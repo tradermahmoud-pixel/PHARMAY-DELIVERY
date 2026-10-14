@@ -1,0 +1,111 @@
+<!doctype html>
+<html lang="ar" dir="rtl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>توصيل الصيدلية</title>
+<meta name="theme-color" content="#0E7C66">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="توصيل الصيدلية">
+<link rel="manifest" href="/manifest.json">
+<link rel="icon" href="/icon-192.png">
+<link rel="apple-touch-icon" href="/icon-192.png">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans+Arabic:wght@400;500;600&family=Readex+Pro:wght@500;700&display=swap">
+<link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+<div class="wrap">
+  <!-- Login -->
+  <section id="login" class="login" hidden>
+    <div class="brand">
+      <img src="/icon-192.png" alt="" width="56" height="56">
+      <h1>توصيل الصيدلية</h1>
+    </div>
+    <form id="loginForm" class="panel" autocomplete="off">
+      <label>الاسم<select id="l-user" required></select></label>
+      <label>الرقم السري<input id="l-pin" type="password" inputmode="numeric" pattern="[0-9]*" maxlength="8" required></label>
+      <button class="btn primary big" type="submit">دخول</button>
+      <p id="loginErr" class="err" hidden></p>
+    </form>
+  </section>
+
+  <!-- App -->
+  <section id="app" hidden>
+    <header class="topbar">
+      <div>
+        <h1>توصيل الصيدلية</h1>
+        <div class="hint"><span id="whoami"></span> · <span id="sync">متصل</span></div>
+      </div>
+      <button class="btn small" id="logout">خروج</button>
+    </header>
+
+    <section class="summary" id="summary" aria-label="ملخص النهارده"></section>
+
+    <nav class="tabs" role="tablist" id="tabs"></nav>
+
+    <!-- Orders -->
+    <section id="tab-orders" class="list" hidden>
+      <div class="row spread">
+        <button class="btn primary" id="toggleForm">+ أوردر جديد</button>
+        <span class="hint" id="suggest"></span>
+      </div>
+      <form id="orderForm" class="panel" hidden autocomplete="off">
+        <h2>أوردر جديد</h2>
+        <div class="grid2">
+          <label>اسم العميل<input id="f-customer" required></label>
+          <label>الموبايل<input id="f-phone" inputmode="tel" placeholder="01xxxxxxxxx"></label>
+        </div>
+        <label>العنوان<input id="f-address" required placeholder="المنطقة، الشارع، العمارة، الدور"></label>
+        <label>الطلب<textarea id="f-items" placeholder="الأصناف، أو: الروشتة على الواتساب"></textarea></label>
+        <div class="grid2">
+          <label>المبلغ (جنيه)<input id="f-amount" type="number" inputmode="decimal" min="0"></label>
+          <label>جه منين<select id="f-source"><option>واتساب</option><option>تليفون</option></select></label>
+          <label>وعد التوصيل (دقيقة)<select id="f-promise"><option>30</option><option>45</option><option selected>60</option><option>90</option></select></label>
+          <label>الدفع<select id="f-payment"><option>كاش</option><option>فودافون كاش / انستاباي</option><option>مدفوع</option></select></label>
+        </div>
+        <div class="row">
+          <button class="btn primary" type="submit">سجّل الأوردر</button>
+          <button class="btn" type="button" id="cancelForm">إلغاء</button>
+        </div>
+      </form>
+      <div class="chips" id="filters"></div>
+      <div class="list" id="orderList"></div>
+    </section>
+
+    <!-- Driver -->
+    <section id="tab-driver" class="list" hidden>
+      <div class="hint" id="driverStats"></div>
+      <div class="list" id="driverList"></div>
+    </section>
+
+    <!-- Report -->
+    <section id="tab-report" class="list" hidden>
+      <div class="panel grid2 dates">
+        <label>من<input type="date" id="r-from"></label>
+        <label>إلى<input type="date" id="r-to"></label>
+      </div>
+      <div id="reportBody" class="list"></div>
+    </section>
+
+    <!-- Users -->
+    <section id="tab-users" class="list" hidden>
+      <div id="userList" class="list"></div>
+      <form id="userForm" class="panel" autocomplete="off">
+        <h2>إضافة مستخدم</h2>
+        <div class="grid2">
+          <label>الاسم<input id="u-name" required></label>
+          <label>الموبايل<input id="u-phone" inputmode="tel"></label>
+          <label>الدور<select id="u-role"><option value="driver">طيار</option><option value="staff">موظف صيدلية</option><option value="admin">مدير</option></select></label>
+          <label>الرقم السري (4 لـ 8 أرقام)<input id="u-pin" inputmode="numeric" pattern="[0-9]{4,8}" required></label>
+        </div>
+        <button class="btn primary" type="submit">إضافة</button>
+      </form>
+    </section>
+  </section>
+</div>
+<div id="sheetHost"></div>
+<div id="toastHost"></div>
+<script src="/app.js"></script>
+</body>
+</html>
