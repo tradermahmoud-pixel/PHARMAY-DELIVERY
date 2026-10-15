@@ -102,7 +102,13 @@
     try {
       const r = await api("/api/orders");
       S.skew = Date.parse(r.now) - Date.now();
+      const hadLoc = new Set(S.orders.filter(o => o.lat != null).map(o => o.id));
+      const firstLoad = !S.orders.length;
       S.orders = r.orders; S.today = r.day;
+      if (!firstLoad && S.user.role !== "driver") {
+        const arrived = S.orders.find(o => o.lat != null && o.loc_source === "customer" && !hadLoc.has(o.id));
+        if (arrived) toast(`لوكيشن أوردر #${arrived.no} وصل من العميل`);
+      }
       if (S.user.role !== "driver") S.drivers = (await api("/api/users")).filter(u => u.role === "driver" && u.active);
       $("sync").textContent = "آخر تحديث " + clock(new Date());
       notifyDriver();
@@ -120,6 +126,18 @@
     }
     S.lastMine = mine;
   }
+
+  /* ---------- location helpers ---------- */
+  function mapHref(o) {
+    if (o.lat != null && o.lng != null) return `https://www.google.com/maps/dir/?api=1&destination=${o.lat},${o.lng}`;
+    if (o.location_url) return o.location_url;
+    if (o.address) return `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(o.address)}`;
+    return "";
+  }
+  const waLink = (phone, text) => {
+    const d = String(phone || "").replace(/\D/g, ""); const intl = d.startsWith("0") ? "2" + d : d;
+    return `https://wa.me/${intl}?text=${encodeURIComponent(text)}`;
+  };
 
   /* ---------- logic ---------- */
   const isFinal = o => o.status === "done" || o.status === "cancel";
@@ -198,7 +216,16 @@
     const digits = String(o.phone || "").replace(/\D/g, "");
     const intl = digits.startsWith("0") ? "2" + digits : digits;
     const contact = digits ? `<a class="btn small" href="https://wa.me/${intl}" target="_blank" rel="noopener">واتساب</a><a class="btn small" href="tel:${digits}">اتصال</a>` : "";
-    const maps = driverMode && o.address ? `<a class="btn small" href="https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(o.address)}" target="_blank" rel="noopener">الخريطة</a>` : "";
+    const hasLoc = o.lat != null || !!o.location_url;
+    const href = mapHref(o);
+    const maps = (driverMode || hasLoc) && href ? `<a class="btn small ${driverMode && hasLoc ? "primary" : ""}" href="${esc(href)}" target="_blank" rel="noopener">${hasLoc ? "افتح اللوكيشن" : "دوّر على العنوان"}</a>` : "";
+    if (!driverMode && !isFinal(o)) {
+      actions += hasLoc
+        ? `<button class="btn small" data-act="addloc" data-id="${o.id}">تغيير اللوكيشن</button>`
+        : `<button class="btn small loc" data-act="reqloc" data-id="${o.id}">اطلب اللوكيشن</button><button class="btn small" data-act="addloc" data-id="${o.id}">الصق لوكيشن</button>`;
+    }
+    const locSrc = { customer: "العميل بعته", staff: "اتسجل", saved: "محفوظ من قبل" }[o.loc_source] || "";
+    const locPill = hasLoc ? `<span class="pill okp">لوكيشن ✓ ${locSrc}</span>` : (!isFinal(o) ? `<span class="pill warnp">مفيش لوكيشن</span>` : "");
     const copy = !driverMode ? `<button class="btn small" data-act="copy" data-id="${o.id}">${o.status === "out" ? "رسالة: خرج" : "نسخ"}</button>` : "";
     return `<article class="card st-${o.status} ${lt === "late" && !isFinal(o) ? "is-late" : lt === "warn" && !isFinal(o) ? "is-warn" : ""}">
       <div class="top">
@@ -213,6 +240,7 @@
         <span>${esc(o.source)}</span>·<span>${Number(o.amount) ? esc(Number(o.amount)) + " ج" : "—"}</span>·<span>${esc(o.payment)}</span>·<span>اتسجل ${clock(o.created_at)}</span>
         ${o.driver_name ? `·<span>الطيار: ${esc(o.driver_name)}</span>` : ""}
         ${o.cancel_reason ? `·<span style="color:var(--late)">السبب: ${esc(o.cancel_reason)}</span>` : ""}
+        ${locPill}
       </div>
       <div class="row">${actions}${contact}${maps}${copy}</div>
     </article>`;
@@ -362,6 +390,41 @@
         sheet(`<h2>رقم سري جديد لـ ${esc(u.name)}</h2><input id="newPin" inputmode="numeric" maxlength="8" placeholder="4 لـ 8 أرقام"><div class="row"><button class="btn primary" data-act="savePin" data-id="${id}">حفظ</button><button class="btn" data-act="closeSheet">رجوع</button></div>`);
         $("newPin").focus(); break;
       }
+      case "reqloc": {
+        if (!o) return;
+        a.disabled = true;
+        try {
+          const r = await api(`/api/orders/${id}/loc-link`, { method: "POST" });
+          const msg = `أهلاً ${o.customer}، عشان أوردرك من الصيدلية يوصلك أسرع، دوس على اللينك ده وابعت موقعك بضغطة واحدة:\n${r.url}`;
+          sheet(`<h2>اطلب لوكيشن أوردر #${o.no}</h2>
+            <p class="hint" style="margin:0">العميل هيفتح اللينك ويدوس "ابعت موقعي"، واللوكيشن هيظهر هنا لوحده.</p>
+            ${o.phone ? `<a class="btn primary big" href="${esc(waLink(o.phone, msg))}" target="_blank" rel="noopener" data-act="closeSheet">ابعته على واتساب</a>` : ""}
+            <textarea id="copyArea" rows="4" readonly>${esc(msg)}</textarea>
+            <div class="row"><button class="btn" data-act="copyMsg">نسخ الرسالة</button><button class="btn" data-act="closeSheet">رجوع</button></div>`);
+        } catch (err) { toast(err.message); }
+        a.disabled = false; break;
+      }
+      case "copyMsg": {
+        const ta = $("copyArea"); const text = ta.value;
+        try { navigator.clipboard.writeText(text).then(() => toast("اتنسخ"), () => { ta.focus(); ta.select(); }); } catch (err) { ta.focus(); ta.select(); }
+        break;
+      }
+      case "addloc": {
+        if (!o) return;
+        sheet(`<h2>لوكيشن أوردر #${o.no}</h2>
+          <p class="hint" style="margin:0">من الواتساب: دوس على اللوكيشن اللي العميل بعته، ثم شارك أو انسخ اللينك، والصقه هنا. ينفع كمان لينك جوجل ماب أو إحداثيات.</p>
+          <textarea id="locInput" rows="3" placeholder="https://maps.app.goo.gl/..."></textarea>
+          <div class="row"><button class="btn primary" data-act="saveLoc" data-id="${id}">حفظ اللوكيشن</button><button class="btn" data-act="closeSheet">رجوع</button></div>`);
+        $("locInput").focus(); break;
+      }
+      case "saveLoc": {
+        a.disabled = true;
+        try {
+          const r = await api(`/api/orders/${id}/location`, { method: "POST", body: { location: $("locInput").value } });
+          closeSheet(); toast(r.found_coords ? "اللوكيشن اتحفظ" : "اللينك اتحفظ، والطيار هيفتحه على الخريطة"); await refresh();
+        } catch (err) { toast(err.message); a.disabled = false; }
+        break;
+      }
       case "savePin":
         try { await api("/api/users/" + id, { method: "PATCH", body: { pin: $("newPin").value } }); closeSheet(); toast("الرقم السري اتغيّر"); } catch (err) { toast(err.message); }
         break;
@@ -375,15 +438,36 @@
   });
   $("toggleForm").addEventListener("click", () => { const f = $("orderForm"); f.hidden = !f.hidden; if (!f.hidden) $("f-customer").focus(); });
   $("cancelForm").addEventListener("click", () => ($("orderForm").hidden = true));
+  let knownCustomer = null;
+  async function lookupCustomer() {
+    const phone = $("f-phone").value.trim();
+    knownCustomer = null; $("known").hidden = true;
+    if (phone.replace(/\D/g, "").length < 10) return;
+    try {
+      const c = await api("/api/customers/" + encodeURIComponent(phone));
+      if (!c || $("f-phone").value.trim() !== phone) return;
+      knownCustomer = c;
+      if (!$("f-customer").value.trim() && c.name) $("f-customer").value = c.name;
+      if (!$("f-address").value.trim() && c.address) $("f-address").value = c.address;
+      const hasLoc = c.lat != null || c.location_url;
+      $("known").innerHTML = `<b>عميل قديم</b> · ${c.orders_count} أوردر قبل كده` +
+        (hasLoc ? `<label class="check"><input type="checkbox" id="f-useSaved" checked> استخدم اللوكيشن المحفوظ</label>` : `<span class="hint"> · مفيش لوكيشن محفوظ</span>`);
+      $("known").hidden = false;
+    } catch (e) {}
+  }
+  $("f-phone").addEventListener("change", lookupCustomer);
+  $("f-phone").addEventListener("blur", lookupCustomer);
+
   $("orderForm").addEventListener("submit", async e => {
     e.preventDefault();
     const btn = e.target.querySelector("[type=submit]"); btn.disabled = true;
     try {
       const o = await api("/api/orders", { method: "POST", body: {
         customer: $("f-customer").value, phone: $("f-phone").value, address: $("f-address").value, items: $("f-items").value,
-        amount: $("f-amount").value, source: $("f-source").value, payment: $("f-payment").value, promise_min: Number($("f-promise").value) } });
-      e.target.reset(); $("f-promise").value = "60"; e.target.hidden = true; S.filter = "active";
-      toast("الأوردر اتسجل #" + o.no); await refresh();
+        amount: $("f-amount").value, source: $("f-source").value, payment: $("f-payment").value, promise_min: Number($("f-promise").value),
+        location: $("f-location").value, use_saved_location: !!($("f-useSaved") && $("f-useSaved").checked) } });
+      e.target.reset(); knownCustomer = null; $("known").hidden = true; $("f-promise").value = "60"; e.target.hidden = true; S.filter = "active";
+      toast("الأوردر اتسجل #" + o.no + (o.lat != null || o.location_url ? " باللوكيشن" : "")); await refresh();
     } catch (err) { toast(err.message); }
     btn.disabled = false;
   });

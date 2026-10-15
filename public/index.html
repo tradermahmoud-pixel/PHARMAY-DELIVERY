@@ -56,7 +56,10 @@
           <label>اسم العميل<input id="f-customer" required></label>
           <label>الموبايل<input id="f-phone" inputmode="tel" placeholder="01xxxxxxxxx"></label>
         </div>
+        <div id="known" class="known" hidden></div>
         <label>العنوان<input id="f-address" required placeholder="المنطقة، الشارع، العمارة، الدور"></label>
+        <label>اللوكيشن (اختياري)<input id="f-location" placeholder="الصق لينك جوجل ماب أو اللوكيشن من الواتساب"></label>
+        <p class="hint" style="margin:0">مفيش لوكيشن؟ سجّل الأوردر، وبعدين دوس "اطلب اللوكيشن" تحت الأوردر ويتبعت للعميل لينك يبعت بيه موقعه بضغطة.</p>
         <label>الطلب<textarea id="f-items" placeholder="الأصناف، أو: الروشتة على الواتساب"></textarea></label>
         <div class="grid2">
           <label>المبلغ (جنيه)<input id="f-amount" type="number" inputmode="decimal" min="0"></label>

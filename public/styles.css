@@ -91,3 +91,10 @@ td.n{font-variant-numeric:tabular-nums}
 .user{display:flex;justify-content:space-between;gap:8px;align-items:center;border-bottom:1px solid var(--line);padding-bottom:8px;flex-wrap:wrap}
 @media (max-width:480px){.summary{grid-template-columns:repeat(2,minmax(0,1fr))}.grid2{grid-template-columns:1fr}}
 .panel.dates{display:grid;grid-template-columns:1fr 1fr}
+.pill.okp{color:var(--ok);border-color:var(--ok)}
+.pill.warnp{color:var(--warn);border-color:var(--warn)}
+.btn.loc{border-color:var(--accent);color:var(--accent)}
+.known{background:var(--accent-soft);border-radius:8px;padding:8px 10px;font-size:.88rem;display:flex;flex-wrap:wrap;gap:6px 12px;align-items:center}
+label.check{flex-direction:row;align-items:center;gap:6px;color:var(--ink);font-size:.88rem}
+label.check input{width:auto}
+a.btn.big{text-decoration:none}

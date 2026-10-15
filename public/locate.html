@@ -1,0 +1,70 @@
+<!doctype html>
+<html lang="ar" dir="rtl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>ابعت موقعك للصيدلية</title>
+<meta name="theme-color" content="#0E7C66">
+<meta name="robots" content="noindex">
+<link rel="icon" href="/icon-192.png">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans+Arabic:wght@400;600&family=Readex+Pro:wght@700&display=swap">
+<style>
+:root{--bg:#EEF3F1;--surface:#fff;--ink:#12302C;--muted:#5B716D;--line:#D6E1DD;--accent:#0E7C66;--accent-ink:#fff;--late:#C2362B;--ok:#2F8F4E;color-scheme:light}
+@media (prefers-color-scheme:dark){:root{--bg:#0D1817;--surface:#152321;--ink:#E3EEEB;--muted:#93A8A3;--line:#263936;--accent:#3DBB9A;--accent-ink:#06201A;--late:#F0786C;--ok:#5CC27A;color-scheme:dark}}
+*{box-sizing:border-box}
+body{margin:0;min-height:100vh;background:var(--bg);color:var(--ink);font-family:"IBM Plex Sans Arabic",Tahoma,sans-serif;display:flex;align-items:center;justify-content:center;
+  padding:max(24px,env(safe-area-inset-top)) max(16px,env(safe-area-inset-right)) max(24px,env(safe-area-inset-bottom)) max(16px,env(safe-area-inset-left))}
+main{width:100%;max-width:420px;background:var(--surface);border:1px solid var(--line);border-radius:18px;padding:26px 20px;display:flex;flex-direction:column;gap:16px;text-align:center}
+img{margin:0 auto;border-radius:14px}
+h1{font-family:"Readex Pro","IBM Plex Sans Arabic",sans-serif;font-size:1.35rem;margin:0;text-wrap:balance}
+p{margin:0;color:var(--muted);line-height:1.6}
+button{font:700 1.15rem "Readex Pro","IBM Plex Sans Arabic",sans-serif;background:var(--accent);color:var(--accent-ink);border:0;border-radius:14px;padding:18px;cursor:pointer}
+button:disabled{opacity:.6}
+.msg{font-weight:600}
+.ok{color:var(--ok)} .err{color:var(--late)}
+.small{font-size:.85rem}
+</style>
+</head>
+<body>
+<main>
+  <img src="/icon-192.png" alt="" width="64" height="64">
+  <h1 id="title">ابعت موقعك عشان الأوردر يوصلك أسرع</h1>
+  <p id="sub">دوس على الزرار، ولما الموبايل يسألك وافق على مشاركة الموقع. الطيار هيوصلك على اللوكيشن بالظبط.</p>
+  <button id="send" type="button">ابعت موقعي</button>
+  <p id="msg" class="msg" role="status" hidden></p>
+  <p class="small" id="help" hidden>لو مش شغال: افتح الواتساب، ودوس على علامة المشبك ثم "الموقع" وابعته للصيدلية.</p>
+</main>
+<script>
+(function(){
+  var token = location.pathname.split("/").pop();
+  var $ = function(id){ return document.getElementById(id); };
+  function show(t, cls){ var m=$("msg"); m.hidden=false; m.className="msg "+(cls||""); m.textContent=t; }
+  fetch("/api/public/loc/"+encodeURIComponent(token)).then(function(r){ return r.json().then(function(d){ return {ok:r.ok,d:d}; }); }).then(function(x){
+    if(!x.ok){ $("send").hidden=true; $("sub").hidden=true; $("title").textContent="اللينك ده انتهى"; show(x.d.error||"", "err"); return; }
+    $("title").textContent = "أهلًا "+(x.d.name||"")+"، ابعت موقعك لأوردر #"+x.d.no;
+    if(x.d.done){ $("send").hidden=true; show("الأوردر ده خلص. شكرًا ليك.", "ok"); }
+    else if(x.d.has){ show("موقعك وصلنا قبل كده. لو اتغيّر دوس تاني.", "ok"); }
+  }).catch(function(){});
+
+  $("send").addEventListener("click", function(){
+    var b=$("send");
+    if(!navigator.geolocation){ show("الموبايل ده مش بيدعم مشاركة الموقع.", "err"); $("help").hidden=false; return; }
+    b.disabled=true; b.textContent="بيحدد موقعك…";
+    navigator.geolocation.getCurrentPosition(function(pos){
+      fetch("/api/public/loc/"+encodeURIComponent(token), {method:"POST", headers:{"Content-Type":"application/json"},
+        body: JSON.stringify({lat:pos.coords.latitude, lng:pos.coords.longitude, acc:pos.coords.accuracy})})
+      .then(function(r){ return r.json().then(function(d){ return {ok:r.ok,d:d}; }); })
+      .then(function(x){
+        if(x.ok){ b.hidden=true; $("sub").hidden=true; $("title").textContent="تمام، موقعك وصل للصيدلية"; show("الطيار هيوصلك على اللوكيشن ده. تقدر تقفل الصفحة.", "ok"); }
+        else { b.disabled=false; b.textContent="جرّب تاني"; show(x.d.error||"حصلت مشكلة، جرّب تاني", "err"); }
+      }).catch(function(){ b.disabled=false; b.textContent="جرّب تاني"; show("مفيش نت، جرّب تاني", "err"); });
+    }, function(err){
+      b.disabled=false; b.textContent="ابعت موقعي";
+      show(err.code===1 ? "الموبايل رفض مشاركة الموقع. اسمح للمتصفح بالموقع من الإعدادات وجرّب تاني." : "مش قادر يحدد موقعك. اتأكد إن الـ GPS شغال وجرّب تاني.", "err");
+      $("help").hidden=false;
+    }, {enableHighAccuracy:true, timeout:20000, maximumAge:0});
+  });
+})();
+</script>
+</body>
+</html>
