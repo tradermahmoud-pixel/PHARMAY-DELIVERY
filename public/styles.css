@@ -98,3 +98,19 @@ td.n{font-variant-numeric:tabular-nums}
 label.check{flex-direction:row;align-items:center;gap:6px;color:var(--ink);font-size:.88rem}
 label.check input{width:auto}
 a.btn.big{text-decoration:none}
+.custody{background:var(--warn-soft);border-radius:10px;padding:10px 12px;font-size:.92rem}
+.methods{display:flex;flex-wrap:wrap;gap:6px}
+.methods .chip{font-size:.95rem;padding:8px 14px}
+.pill.pay{color:var(--ink)}
+.addr-list{display:flex;flex-direction:column;gap:6px;width:100%}
+.addr-opt{flex-direction:row;align-items:flex-start;gap:8px;color:var(--ink);font-size:.9rem;background:var(--surface);border:1px solid var(--line);border-radius:8px;padding:8px 10px}
+.addr-opt input{width:auto;margin-top:4px}
+.known{flex-direction:column;align-items:stretch}
+.client-row{text-align:right;font:inherit;color:inherit;cursor:pointer;width:100%}
+.addr-card{border:1px solid var(--line);border-radius:10px;padding:10px;display:flex;flex-direction:column;gap:8px}
+.sheet .panel{max-height:88vh}
+.sheet-scroll{overflow-y:auto;max-height:76vh;padding-bottom:4px}
+h3{font-family:var(--display);font-size:.95rem;margin:4px 0 0}
+#importPanel table{font-size:.8rem}
+#importPanel select{min-width:110px;padding:5px}
+label > .pill{align-self:flex-start}
