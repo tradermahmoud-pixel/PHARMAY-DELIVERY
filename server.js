@@ -151,6 +151,13 @@ async function migrate() {
     );
     CREATE INDEX IF NOT EXISTS driver_positions_idx ON driver_positions(driver_id, at);
     CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL DEFAULT '');
+    -- Arabic-insensitive search: أ/إ/آ=ا, ى=ي, ة=ه, ؤ=و, ئ=ي, Arabic digits, no tashkeel or punctuation
+    CREATE OR REPLACE FUNCTION norm_ar(t text) RETURNS text LANGUAGE sql IMMUTABLE AS $f$
+      SELECT trim(regexp_replace(regexp_replace(
+        translate(lower(coalesce(t, '')), 'أإآٱىةؤئ٠١٢٣٤٥٦٧٨٩ـًٌٍَُِّْ', 'اااايهوي0123456789'),
+        '[^0-9a-zء-ي ]+', ' ', 'g'), ' +', ' ', 'g'))
+    $f$;
+    ALTER TABLE clients ADD COLUMN IF NOT EXISTS search TEXT;
     -- old payment labels → new ones
     UPDATE orders SET payment = 'نقدي' WHERE payment = 'كاش';
     UPDATE orders SET payment = 'محفظة' WHERE payment = 'فودافون كاش / انستاباي';
@@ -172,6 +179,8 @@ async function migrate() {
       console.log(`Moved ${old.rows.length} customers to the new structure`);
     }
   }
+  // fill the search text for customers that don't have it yet
+  await q(`UPDATE clients c SET search = ${SEARCH_EXPR} WHERE c.search IS NULL`);
   // First run: create the admin account from ADMIN_PIN
   const { rows } = await q(`SELECT count(*)::int AS n FROM users`);
   if (rows[0].n === 0) {
@@ -283,6 +292,21 @@ function splitPhones(v) {
   return out;
 }
 
+// what a customer can be found by: name, area, code and every address
+const SEARCH_EXPR = `norm_ar(concat_ws(' ', c.name, c.area, c.code,
+  (SELECT string_agg(concat_ws(' ', a.label, a.address, a.area), ' ') FROM client_addresses a WHERE a.client_id = c.id)))`;
+async function refreshSearch(ids, cq = q) {
+  ids = [...new Set((ids || []).filter(Boolean))];
+  if (ids.length) await cq(`UPDATE clients c SET search = ${SEARCH_EXPR} WHERE c.id = ANY($1)`, [ids]);
+}
+// same rules as norm_ar() in the database
+function normAr(t) {
+  return String(t || "").toLowerCase()
+    .replace(/[أإآٱ]/g, "ا").replace(/ى/g, "ي").replace(/ة/g, "ه").replace(/ؤ/g, "و").replace(/ئ/g, "ي")
+    .replace(/[٠-٩]/g, d => "٠١٢٣٤٥٦٧٨٩".indexOf(d)).replace(/[\u0640\u064B-\u0652]/g, "")
+    .replace(/[^0-9a-zء-ي ]+/g, " ").replace(/\s+/g, " ").trim();
+}
+
 const CLIENT_COLS = `id, name, notes, orders_count, code, area, delivery_fee::float AS delivery_fee, branch, invoices,
   first_purchase, last_purchase, spend_12m::float AS spend_12m, status`;
 async function clientById(id) {
@@ -321,6 +345,7 @@ async function upsertAddress(clientId, { address, label, lat, lng, location_url 
   if (!n && lat == null && !location_url) return { id: null, created: false };
   const id = (await q(`INSERT INTO client_addresses(client_id, label, address, lat, lng, location_url) VALUES ($1,$2,$3,$4,$5,$6) RETURNING id`,
     [clientId, label || "", String(address || "").trim(), lat ?? null, lng ?? null, location_url ?? null])).rows[0].id;
+  await refreshSearch([clientId]);
   return { id, created: true };
 }
 // When a location arrives for an order, keep it on the customer's address too
@@ -513,6 +538,7 @@ app.post("/api/orders", auth, allow("admin", "staff"), wrap(async (req, res) => 
   const area = String(b.area || addrArea || (picked || !cl.area ? "" : cl.area) || "").slice(0, 60);
   const fee = Math.max(0, Math.min(1000, num(b.delivery_fee, num(cl.delivery_fee, 0))));
   await q(`UPDATE clients SET name = CASE WHEN name='' THEN $2 ELSE name END, orders_count = orders_count + 1, updated_at=now() WHERE id=$1`, [clientId, name]);
+  await refreshSearch([clientId]);
 
   const day = todayCairo();
   const conn = await pool.connect();
@@ -600,20 +626,25 @@ app.patch("/api/orders/:id", auth, wrap(async (req, res) => {
 /* ---- clients (customers) ---- */
 const staffOnly = allow("admin", "staff");
 app.get("/api/clients", auth, staffOnly, wrap(async (req, res) => {
-  const term = String(req.query.q || "").trim().slice(0, 60);
-  const digits = normPhone(term);
-  const params = []; let where = "";
+  const term = String(req.query.q || "").trim().slice(0, 80);
+  const words = normAr(term).split(" ").filter(Boolean).slice(0, 6);
+  const digits = term.replace(/[٠-٩]/g, d => "٠١٢٣٤٥٦٧٨٩".indexOf(d)).replace(/\D/g, "");
+  const params = []; const P = v => { params.push(v); return "$" + params.length; };
+  let where = "", rank = "";
   if (term) {
-    params.push("%" + term + "%", term);
-    const conds = [`c.name ILIKE $1`, `c.area ILIKE $1`, `c.code = $2`,
-      `EXISTS (SELECT 1 FROM client_addresses a WHERE a.client_id=c.id AND a.address ILIKE $1)`];
-    if (/^\d[\d\s-]{2,}$/.test(term) && digits.length >= 3) {
-      params.push("%" + digits.replace(/^0/, "") + "%");
-      conds.push(`EXISTS (SELECT 1 FROM client_phones p WHERE p.client_id=c.id AND p.phone LIKE $3)`);
-    }
+    const conds = [];
+    // every word must appear somewhere (name, area, code or an address), in any order
+    if (words.length) conds.push("(" + words.map(w => `c.search LIKE ${P("%" + w + "%")}`).join(" AND ") + ")");
+    if (digits.length >= 3) conds.push(`c.code = ${P(digits)}`);
+    // phone: typed with or without the leading 0, spaces or dashes
+    const looksPhone = digits.length >= 4 && digits.length >= term.replace(/\s|-/g, "").length - 1;
+    if (looksPhone) conds.push(`EXISTS (SELECT 1 FROM client_phones p WHERE p.client_id=c.id AND p.phone LIKE ${P("%" + normPhone(digits).replace(/^0/, "") + "%")})`);
+    if (!conds.length) return res.json({ total: (await q(`SELECT count(*)::int AS n FROM clients`)).rows[0].n, clients: [] });
     where = "WHERE " + conds.join(" OR ");
+    const nameAll = words.length ? words.map(w => `norm_ar(c.name) LIKE ${P("%" + w + "%")}`).join(" AND ") : "false";
+    rank = `${digits.length >= 3 ? `(c.code = ${P(digits)}) DESC,` : ""} (${nameAll}) DESC,
+      ${words.length ? `(norm_ar(c.name) LIKE ${P(words[0] + "%")}) DESC,` : ""}`;
   }
-  const rank = term ? `(c.code = $2) DESC, (c.name ILIKE $2 || '%') DESC,` : "";
   const { rows } = await q(`WITH hit AS (
       SELECT c.id FROM clients c ${where}
       ORDER BY ${rank} c.last_purchase DESC NULLS LAST, c.updated_at DESC LIMIT 40)
@@ -645,6 +676,7 @@ app.post("/api/clients", auth, staffOnly, wrap(async (req, res) => {
   if (!String(b.name || "").trim() && !phones.length) return res.status(400).json({ error: "اكتب الاسم أو الرقم" });
   const id = (await q(`INSERT INTO clients(name) VALUES ($1) RETURNING id`, [String(b.name || "").trim()])).rows[0].id;
   for (const p of phones) await addPhone(id, p);
+  await refreshSearch([id]);
   res.json(await clientById(id));
 }));
 app.patch("/api/clients/:id", auth, staffOnly, wrap(async (req, res) => {
@@ -653,6 +685,7 @@ app.patch("/api/clients/:id", auth, staffOnly, wrap(async (req, res) => {
   if (b.notes !== undefined) await q(`UPDATE clients SET notes=$2, updated_at=now() WHERE id=$1`, [id, String(b.notes).slice(0, 500)]);
   if (b.area !== undefined) await q(`UPDATE clients SET area=$2 WHERE id=$1`, [id, String(b.area).trim().slice(0, 60)]);
   if (b.delivery_fee !== undefined) await q(`UPDATE clients SET delivery_fee=$2 WHERE id=$1`, [id, num(b.delivery_fee)]);
+  await refreshSearch([id]);
   res.json(await clientById(id));
 }));
 app.delete("/api/clients/:id", auth, allow("admin"), wrap(async (req, res) => {
@@ -680,6 +713,7 @@ app.post("/api/clients/:id/addresses", auth, staffOnly, wrap(async (req, res) =>
   if (!String(b.address || "").trim() && !loc) return res.status(400).json({ error: "اكتب العنوان أو الصق اللوكيشن" });
   await q(`INSERT INTO client_addresses(client_id, label, address, lat, lng, location_url) VALUES ($1,$2,$3,$4,$5,$6)`,
     [id, String(b.label || "").trim(), String(b.address || "").trim(), loc ? loc.lat : null, loc ? loc.lng : null, loc ? loc.location_url : null]);
+  await refreshSearch([id]);
   res.json(await clientById(id));
 }));
 app.patch("/api/addresses/:id", auth, staffOnly, wrap(async (req, res) => {
@@ -693,10 +727,12 @@ app.patch("/api/addresses/:id", auth, staffOnly, wrap(async (req, res) => {
     if (loc.error) return res.status(400).json({ error: loc.error });
     await q(`UPDATE client_addresses SET lat=$2, lng=$3, location_url=$4 WHERE id=$1`, [id, loc.lat, loc.lng, loc.location_url]);
   }
+  await refreshSearch([a.client_id]);
   res.json(await clientById(a.client_id));
 }));
 app.delete("/api/addresses/:id", auth, staffOnly, wrap(async (req, res) => {
   const a = (await q(`DELETE FROM client_addresses WHERE id=$1 RETURNING client_id`, [Number(req.params.id)])).rows[0];
+  if (a) await refreshSearch([a.client_id]);
   res.json(a ? await clientById(a.client_id) : { ok: true });
 }));
 
@@ -827,6 +863,7 @@ app.post("/api/clients/import", auth, allow("admin"), wrap(async (req, res) => {
     if (A.cid.length) st.addresses = (await cq(`INSERT INTO client_addresses(client_id, label, address, area, lat, lng, location_url, last_used_at)
       SELECT * FROM unnest($1::int[], $2::text[], $3::text[], $4::text[], $5::float8[], $6::float8[], $7::text[], $8::timestamptz[])`,
       [A.cid, A.label, A.address, A.area, A.lat, A.lng, A.url, A.used])).rowCount;
+    await refreshSearch(gIds, cq);
     await conn.query("COMMIT");
   } catch (e) { await conn.query("ROLLBACK"); throw e; }
   finally { conn.release(); }
