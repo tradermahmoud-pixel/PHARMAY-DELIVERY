@@ -158,6 +158,19 @@ async function migrate() {
         '[^0-9a-zء-ي ]+', ' ', 'g'), ' +', ' ', 'g'))
     $f$;
     ALTER TABLE clients ADD COLUMN IF NOT EXISTS search TEXT;
+    -- edits after an order is placed (items added/removed, price changes), with history
+    ALTER TABLE orders ADD COLUMN IF NOT EXISTS edits INT NOT NULL DEFAULT 0;
+    ALTER TABLE orders ADD COLUMN IF NOT EXISTS edited_at TIMESTAMPTZ;
+    CREATE TABLE IF NOT EXISTS order_changes (
+      id SERIAL PRIMARY KEY,
+      order_id INT NOT NULL REFERENCES orders(id) ON DELETE CASCADE,
+      user_id INT REFERENCES users(id) ON DELETE SET NULL,
+      at TIMESTAMPTZ NOT NULL DEFAULT now(),
+      kind TEXT NOT NULL DEFAULT 'edit',
+      fields JSONB NOT NULL DEFAULT '{}',
+      note TEXT NOT NULL DEFAULT ''
+    );
+    CREATE INDEX IF NOT EXISTS order_changes_order_idx ON order_changes(order_id);
     -- old payment labels → new ones
     UPDATE orders SET payment = 'نقدي' WHERE payment = 'كاش';
     UPDATE orders SET payment = 'محفظة' WHERE payment = 'فودافون كاش / انستاباي';
@@ -614,6 +627,7 @@ app.patch("/api/orders/:id", auth, wrap(async (req, res) => {
       if (final) return res.status(400).json({ error: "الأوردر خلص" });
       sql = `UPDATE orders SET status='cancel', cancel_reason=$2, cancelled_at=now(), updated_at=now() WHERE id=$1`;
       params = [id, String(reason || "سبب تاني").slice(0, 100)];
+      await q(`INSERT INTO order_changes(order_id, user_id, kind, note) VALUES ($1,$2,'cancel',$3)`, [id, req.user.id, params[1] + (o.status === "out" ? " (كان مع الطيار)" : "")]);
       break;
     default:
       return res.status(400).json({ error: "طلب غير معروف" });
@@ -621,6 +635,48 @@ app.patch("/api/orders/:id", auth, wrap(async (req, res) => {
   await q(sql, params);
   const out = await q(`SELECT ${ORDER_COLS} FROM orders o LEFT JOIN users d ON d.id=o.driver_id WHERE o.id=$1`, [id]);
   res.json(out.rows[0]);
+}));
+
+/* ---- edit an order after it was placed ---- */
+const EDITABLE = {
+  items: v => String(v ?? "").trim().slice(0, 2000),
+  amount: v => Math.max(0, Math.min(1000000, num(v, 0))),
+  delivery_fee: v => Math.max(0, Math.min(1000, num(v, 0))),
+  payment: v => (METHODS.includes(v) ? v : null),
+  promise_min: v => Math.min(240, Math.max(10, Math.round(num(v, 60)))),
+  address: v => String(v ?? "").trim().slice(0, 300),
+};
+app.put("/api/orders/:id", auth, allow("admin", "staff"), wrap(async (req, res) => {
+  const id = Number(req.params.id); const b = req.body || {};
+  const o = (await q(`SELECT * FROM orders WHERE id=$1`, [id])).rows[0];
+  if (!o) return res.status(404).json({ error: "الأوردر مش موجود" });
+  if (o.status === "done") return res.status(400).json({ error: "الأوردر اتسلم خلاص، مينفعش يتعدل" });
+  if (o.status === "cancel") return res.status(400).json({ error: "الأوردر ده ملغي" });
+  const changes = {}, sets = [], params = [id];
+  for (const [f, clean] of Object.entries(EDITABLE)) {
+    if (b[f] === undefined) continue;
+    const v = clean(b[f]);
+    if (v === null || (f === "address" && !v)) continue;
+    const old = ["amount", "delivery_fee"].includes(f) ? Number(o[f]) : o[f];
+    if (String(old ?? "") === String(v)) continue;
+    changes[f] = [old, v]; params.push(v); sets.push(`${f}=$${params.length}`);
+  }
+  if (!sets.length) return res.status(400).json({ error: "مفيش حاجة اتغيرت" });
+  const note = String(b.note || "").trim().slice(0, 200);
+  await q(`UPDATE orders SET ${sets.join(", ")}, edits=edits+1, edited_at=now(), updated_at=now() WHERE id=$1`, params);
+  await q(`INSERT INTO order_changes(order_id, user_id, kind, fields, note) VALUES ($1,$2,'edit',$3,$4)`, [id, req.user.id, JSON.stringify(changes), note]);
+  const out = await q(`SELECT ${ORDER_COLS} FROM orders o LEFT JOIN users d ON d.id=o.driver_id WHERE o.id=$1`, [id]);
+  res.json(out.rows[0]);
+}));
+app.get("/api/orders/:id/changes", auth, wrap(async (req, res) => {
+  const id = Number(req.params.id);
+  if (req.user.role === "driver") {
+    const o = (await q(`SELECT driver_id FROM orders WHERE id=$1`, [id])).rows[0];
+    if (!o || o.driver_id !== req.user.id) return res.status(403).json({ error: "الأوردر ده مش معاك" });
+  }
+  const { rows } = await q(`SELECT c.at, c.kind, c.fields, c.note, u.name AS by FROM order_changes c LEFT JOIN users u ON u.id=c.user_id
+    WHERE c.order_id=$1 ORDER BY c.at`, [id]);
+  res.json(rows);
 }));
 
 /* ---- clients (customers) ---- */

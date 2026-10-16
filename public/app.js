@@ -161,6 +161,21 @@
   // Buzz the driver's phone when a new order is assigned to them
   function notifyDriver() {
     if (!S.user || S.user.role !== "driver") return;
+    const prev = S.mineState || null, cur = {};
+    S.orders.filter(o => o.driver_id === S.user.id).forEach(o => (cur[o.id] = { e: o.edited_at, s: o.status, no: o.no }));
+    if (prev) {
+      for (const [id, c] of Object.entries(cur)) {
+        const p = prev[id]; if (!p) continue;
+        if (c.s === "cancel" && p.s !== "cancel" && (p.s === "out" || p.s === "ready")) {
+          try { navigator.vibrate && navigator.vibrate([400, 150, 400, 150, 400]); } catch (e) {}
+          toast(`أوردر #${c.no} اتلغى${p.s === "out" ? "، رجّعه للصيدلية" : ""}`);
+        } else if (c.e && c.e !== p.e && c.s !== "cancel") {
+          try { navigator.vibrate && navigator.vibrate([300, 120, 300]); } catch (e) {}
+          toast(`أوردر #${c.no} اتعدل، راجع الطلب والمبلغ`);
+        }
+      }
+    }
+    S.mineState = cur;
     const mine = S.orders.filter(o => o.driver_id === S.user.id && o.status === "ready").map(o => o.id);
     if (S.lastMine && mine.some(id => !S.lastMine.includes(id))) {
       try { navigator.vibrate && navigator.vibrate([200, 100, 200]); } catch (e) {}
@@ -321,7 +336,7 @@
         const label = driverMode && o.status === "ready" ? "استلمته وخرجت" : st.actionLabel;
         actions += `<button class="btn primary small" data-act="advance" data-id="${o.id}" data-to="${st.action}">${label}</button>`;
       }
-      if (!driverMode) actions += `<button class="btn danger small" data-act="cancel" data-id="${o.id}">إلغاء</button>`;
+      if (!driverMode) actions += `<button class="btn small" data-act="edit" data-id="${o.id}">تعديل</button><button class="btn danger small" data-act="cancel" data-id="${o.id}">إلغاء</button>`;
     }
     const digits = String(o.phone || "").replace(/\D/g, "");
     const intl = digits.startsWith("0") ? "2" + digits : digits;
@@ -345,6 +360,9 @@
         </div>
         <div class="clock ${lt}">${clockTxt}</div>
       </div>
+      ${editedOnRoad(o) && !isFinal(o) ? `<div class="edited-alert"><b>اتعدل الساعة ${clock(o.edited_at)} والأوردر مع الطيار.</b> ${driverMode ? "راجع الطلب والمبلغ الجديد قبل ما تسلّم." : "اتأكد إن الطيار عرف."}
+        <button class="btn small" data-act="history" data-id="${o.id}">إيه اللي اتغير</button></div>` : ""}
+      ${o.status === "cancel" && driverMode && o.out_at ? `<div class="edited-alert bad"><b>الأوردر ده اتلغى وهو معاك.</b> رجّعه للصيدلية.</div>` : ""}
       ${o.items ? `<div class="items">${esc(o.items)}</div>` : ""}
       <div class="meta num">
         ${o.area ? `<span class="pill area">${esc(o.area)}</span>` : ""}
@@ -352,6 +370,7 @@
         ${o.driver_name ? `·<span>الطيار: ${esc(o.driver_name)}</span>` : ""}
         ${o.cancel_reason ? `·<span style="color:var(--late)">السبب: ${esc(o.cancel_reason)}</span>` : ""}
         ${locPill}
+        ${o.edits ? `<button class="pill editp" data-act="history" data-id="${o.id}">اتعدل ${o.edits === 1 ? "مرة" : o.edits + " مرات"}</button>` : ""}
         ${(() => { if (driverMode || o.status !== "out" || o.lat == null) return "";
           const d = S.live.find(x => x.id === o.driver_id); if (!d || d.lat == null) return "";
           return `<span class="pill drvp">الطيار على بعد ${fmtKm(distKm(d.lat, d.lng, o.lat, o.lng) * 1.3)} · من ${ago(d.at)}</span>`; })()}
@@ -372,11 +391,12 @@
     const me = S.user.id;
     const out = sortOrders(S.orders.filter(o => o.driver_id === me && o.status === "out"));
     const ready = sortOrders(S.orders.filter(o => o.status === "ready" && (o.driver_id === me || !o.driver_id)));
+    const returned = S.orders.filter(o => o.driver_id === me && o.status === "cancel" && o.out_at && now() - ts(o.cancelled_at) < 3 * 3600000);
     api("/api/custody").then(rows => {
       const c = rows[0];
       $("driverStats").innerHTML = c && c.cash ? `<div class="custody">معاك نقدي <b class="num">${money(c.cash)}</b> من ${c.n} أوردر، لسه متسلمش للصيدلية</div>` : "";
     }).catch(() => {});
-    $("driverList").innerHTML =
+    $("driverList").innerHTML = (returned.length ? `<h2>اتلغى وهو معاك</h2>` + returned.map(o => orderCard(o, true)).join("") : "") +
       `<h2>معاك في الطريق</h2>` + (out.length ? out.map(o => orderCard(o, true)).join("") : `<div class="empty">مفيش أوردرات معاك دلوقتي</div>`) +
       `<h2>جاهز للاستلام من الصيدلية</h2>` + (ready.length ? ready.map(o => orderCard(o, true)).join("") : `<div class="empty">مفيش أوردرات جاهزة</div>`);
   }
@@ -712,6 +732,57 @@
     try { navigator.clipboard.writeText(text).then(() => toast("اتنسخ"), fallback); } catch (e) { fallback(); }
   }
 
+  const editedOnRoad = o => !!(o.edited_at && o.out_at && ts(o.edited_at) > ts(o.out_at));
+  const FIELD_LABEL = { items: "الطلب", amount: "قيمة الطلب", delivery_fee: "التوصيل", payment: "طريقة الدفع", promise_min: "وعد التوصيل", address: "العنوان" };
+  const EDIT_NOTES = ["العميل زوّد أصناف", "العميل لغى صنف", "صنف مش متوفر", "تغيير الكمية", "تصحيح"];
+  function editSheet(o) {
+    sheet(`<div class="row spread"><h2>تعديل أوردر #${o.no}</h2><button class="btn small" data-act="closeSheet">قفل</button></div>
+      <div class="sheet-scroll list">
+        <p class="hint" style="margin:0">${esc(o.customer)}${o.status === "out" ? ` · <b style="color:var(--warn)">الأوردر مع ${esc(o.driver_name || "الطيار")} دلوقتي، وهيوصله تنبيه بالتعديل</b>` : ""}</p>
+        <label>سبب التعديل<div class="methods" id="e-notes">${EDIT_NOTES.map(n => `<button type="button" class="chip" data-act="pickNote" data-n="${esc(n)}" aria-pressed="false">${esc(n)}</button>`).join("")}</div></label>
+        <label>الطلب (زوّد أو امسح الأصناف)<textarea id="e-items" rows="5">${esc(o.items)}</textarea></label>
+        <div class="grid2">
+          <label>قيمة الطلب (جنيه)<input id="e-amount" type="number" inputmode="decimal" min="0" value="${Number(o.amount) || ""}"></label>
+          <label>التوصيل (جنيه)<input id="e-fee" type="number" inputmode="decimal" min="0" value="${Number(o.delivery_fee) || ""}"></label>
+          <label>طريقة الدفع<select id="e-payment">${METHODS.map(m => `<option ${m === o.payment ? "selected" : ""}>${m}</option>`).join("")}</select></label>
+          <label>وعد التوصيل (دقيقة)<select id="e-promise">${[30, 45, 60, 90, 120].map(m => `<option ${m === o.promise_min ? "selected" : ""}>${m}</option>`).join("")}</select></label>
+        </div>
+        <label>العنوان<input id="e-address" value="${esc(o.address)}"></label>
+        <div class="total-line" id="e-total"></div>
+        <div class="row"><button class="btn primary big" style="flex:1" data-act="saveEdit" data-id="${o.id}">حفظ التعديل</button><button class="btn" data-act="closeSheet">رجوع</button></div>
+        <p class="hint" style="margin:0">لو العميل لغى الأوردر كله، استخدم زرار "إلغاء" على الأوردر.</p>
+      </div>`);
+    const upd = () => { const t = (Number($("e-amount").value) || 0) + (Number($("e-fee").value) || 0);
+      const old = (Number(o.amount) || 0) + (Number(o.delivery_fee) || 0);
+      $("e-total").innerHTML = `الإجمالي على العميل: <b class="num">${money(t)}</b>${t !== old ? ` <span class="hint">(كان ${money(old)})</span>` : ""}`; };
+    $("e-amount").addEventListener("input", upd); $("e-fee").addEventListener("input", upd); upd();
+  }
+  // which lines (items) were added or removed
+  function itemsDiff(a, b) {
+    const L = t => String(t || "").split(/\n|،|,|\+/).map(x => x.trim()).filter(Boolean);
+    const key = x => x.replace(/\s+/g, " ").toLowerCase();
+    const A = L(a), B = L(b), ka = new Set(A.map(key)), kb = new Set(B.map(key));
+    const added = B.filter(x => !ka.has(key(x))), removed = A.filter(x => !kb.has(key(x)));
+    return `<div class="hist-f"><span class="hint">الطلب</span>
+      ${added.length ? `<div class="diff add">اتضاف: ${added.map(esc).join("، ")}</div>` : ""}
+      ${removed.length ? `<div class="diff del">اتشال: ${removed.map(esc).join("، ")}</div>` : ""}
+      ${!added.length && !removed.length ? `<div class="now">${esc(b || "—")}</div>` : ""}</div>`;
+  }
+  async function historySheet(o) {
+    let rows = [];
+    try { rows = await api(`/api/orders/${o.id}/changes`); } catch (e) { toast(e.message); return; }
+    const fmt = (f, v) => (f === "amount" || f === "delivery_fee" ? money(v) : f === "promise_min" ? v + " د" : esc(v || "—"));
+    const body = rows.length ? rows.map(c => `<div class="hist">
+        <div class="hist-top"><b>${c.kind === "cancel" ? "اتلغى" : "تعديل"}</b><span class="hint">${clock(c.at)} · ${esc(c.by || "")}</span></div>
+        ${c.note ? `<div>${esc(c.note)}</div>` : ""}
+        ${Object.entries(c.fields || {}).map(([f, [a, b]]) => f === "items"
+          ? itemsDiff(a, b)
+          : `<div class="hist-f"><span class="hint">${FIELD_LABEL[f] || f}</span> <s>${fmt(f, a)}</s> ← <b>${fmt(f, b)}</b></div>`).join("")}
+      </div>`).join("") : `<p class="hint">مفيش تعديلات على الأوردر ده.</p>`;
+    sheet(`<div class="row spread"><h2>تعديلات أوردر #${o.no}</h2><button class="btn small" data-act="closeSheet">قفل</button></div>
+      <div class="sheet-scroll list">${body}</div>`);
+  }
+
   function collectSheet(o) {
     const def = METHODS.includes(o.payment) ? o.payment : "نقدي";
     sheet(`<h2>تسليم أوردر #${o.no}</h2>
@@ -745,6 +816,19 @@
           <button class="btn" data-act="closeSheet">رجوع</button>`); break;
       case "doCancel": closeSheet(); if (await act(id, { action: "cancel", reason: a.dataset.reason })) toast("اتلغى"); break;
       case "closeSheet": closeSheet(); break;
+      case "edit": { await refresh(); const fresh = S.orders.find(x => x.id === id); if (fresh && !isFinal(fresh)) editSheet(fresh); else toast("الأوردر ده خلص أو اتلغى"); break; }
+      case "history": if (o) historySheet(o); break;
+      case "pickNote": a.setAttribute("aria-pressed", a.getAttribute("aria-pressed") === "true" ? "false" : "true"); break;
+      case "saveEdit": {
+        const notes = [...document.querySelectorAll("#e-notes [aria-pressed=true]")].map(b => b.dataset.n).join("، ");
+        a.disabled = true;
+        try {
+          await api("/api/orders/" + id, { method: "PUT", body: { items: $("e-items").value, amount: $("e-amount").value, delivery_fee: $("e-fee").value,
+            payment: $("e-payment").value, promise_min: $("e-promise").value, address: $("e-address").value, note: notes } });
+          closeSheet(); toast(o && o.status === "out" ? "اتعدل، والطيار هيوصله تنبيه" : "الأوردر اتعدل"); await refresh();
+        } catch (err) { toast(err.message); a.disabled = false; }
+        break;
+      }
       case "pickMethod":
         document.querySelectorAll("[data-act=pickMethod]").forEach(b => b.setAttribute("aria-pressed", b === a));
         if (a.dataset.m === "مدفوع مسبقًا") $("collAmount").value = "0";
