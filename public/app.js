@@ -15,8 +15,8 @@
   const REASONS = ["تأخير", "العميل لغى", "صنف ناقص", "عنوان غلط / مش بيرد", "سبب تاني"];
   const FILTERS = [["active", "الشغال"], ["late", "المتأخر"], ["new", "جديد"], ["ready", "جاهز"], ["out", "مع الطيار"], ["done", "اتسلم"], ["cancel", "اتلغى"], ["all", "الكل"]];
   const TABS = {
-    admin: [["orders", "الأوردرات"], ["map", "الخريطة"], ["clients", "العملاء"], ["report", "التقارير"], ["users", "الفريق"]],
-    staff: [["orders", "الأوردرات"], ["map", "الخريطة"], ["clients", "العملاء"], ["report", "التقارير"]],
+    admin: [["orders", "الأوردرات"], ["map", "الخريطة"], ["accounts", "الحسابات"], ["clients", "العملاء"], ["report", "التقارير"], ["users", "الفريق"]],
+    staff: [["orders", "الأوردرات"], ["map", "الخريطة"], ["accounts", "الحسابات"], ["clients", "العملاء"], ["report", "التقارير"]],
     driver: [["driver", "أوردراتي"]],
   };
 
@@ -130,8 +130,9 @@
   function setTab(t) {
     S.tab = t;
     document.querySelectorAll("[data-tab]").forEach(b => b.setAttribute("aria-selected", b.dataset.tab === t));
-    ["orders", "driver", "report", "users", "clients", "map"].forEach(k => ($("tab-" + k).hidden = k !== t));
-    $("summary").hidden = t === "report" || t === "users" || t === "clients" || t === "map";
+    ["orders", "driver", "report", "users", "clients", "map", "accounts"].forEach(k => ($("tab-" + k).hidden = k !== t));
+    $("summary").hidden = ["report", "users", "clients", "map", "accounts"].includes(t);
+    if (t === "accounts") loadAccounts();
     if (t === "map") openMap().catch(err => ($("mapStatus").textContent = err.message));
     if (t === "report") loadReport();
     if (t === "clients") { $("importPanel").hidden = S.user.role !== "admin"; loadClients(); }
@@ -366,7 +367,7 @@
       ${o.items ? `<div class="items">${esc(o.items)}</div>` : ""}
       <div class="meta num">
         ${o.area ? `<span class="pill area">${esc(o.area)}</span>` : ""}
-        <span>${esc(o.source)}</span>·<span>${Number(o.amount) ? money(o.amount) : "—"}${Number(o.delivery_fee) ? ` + توصيل ${money(o.delivery_fee)}` : ""}</span>·<span class="pill pay">${esc(o.collected_method || o.payment)}${o.status === "done" && o.collected_amount != null ? " " + money(o.collected_amount) : ""}</span>·<span>اتسجل ${clock(o.created_at)}</span>
+        <span>${esc(o.source)}</span>·<span>${Number(o.amount) ? money(o.amount) : "—"}${Number(o.delivery_fee) ? ` <span class="hint">(منها توصيل ${money(o.delivery_fee)})</span>` : ""}</span>·<span class="pill pay">${esc(o.collected_method || o.payment)}${o.status === "done" && o.collected_amount != null ? " " + money(o.collected_amount) : ""}</span>·<span>اتسجل ${clock(o.created_at)}</span>
         ${o.driver_name ? `·<span>الطيار: ${esc(o.driver_name)}</span>` : ""}
         ${o.cancel_reason ? `·<span style="color:var(--late)">السبب: ${esc(o.cancel_reason)}</span>` : ""}
         ${locPill}
@@ -392,9 +393,13 @@
     const out = sortOrders(S.orders.filter(o => o.driver_id === me && o.status === "out"));
     const ready = sortOrders(S.orders.filter(o => o.status === "ready" && (o.driver_id === me || !o.driver_id)));
     const returned = S.orders.filter(o => o.driver_id === me && o.status === "cancel" && o.out_at && now() - ts(o.cancelled_at) < 3 * 3600000);
-    api("/api/custody").then(rows => {
+    api("/api/my-account").then(rows => {
       const c = rows[0];
-      $("driverStats").innerHTML = c && c.cash ? `<div class="custody">معاك نقدي <b class="num">${money(c.cash)}</b> من ${c.n} أوردر، لسه متسلمش للصيدلية</div>` : "";
+      $("driverStats").innerHTML = c && c.n ? `<div class="custody acct-mini">
+        <span>وصّلت <b class="num">${c.n}</b> أوردر لسه حسابهم مفتوح</span>
+        <span>عمولتك <b class="num">${money(c.share)}</b></span>
+        <span>معاك نقدي <b class="num">${money(c.cash)}</b></span>
+        <span>${c.net >= 0 ? `هتسلّم للصيدلية <b class="num">${money(c.net)}</b>` : `الصيدلية هتدفعلك <b class="num">${money(-c.net)}</b>`}</span></div>` : "";
     }).catch(() => {});
     $("driverList").innerHTML = (returned.length ? `<h2>اتلغى وهو معاك</h2>` + returned.map(o => orderCard(o, true)).join("") : "") +
       `<h2>معاك في الطريق</h2>` + (out.length ? out.map(o => orderCard(o, true)).join("") : `<div class="empty">مفيش أوردرات معاك دلوقتي</div>`) +
@@ -407,11 +412,6 @@
     try {
       const r = await api(`/api/report?from=${$("r-from").value}&to=${$("r-to").value}`);
       renderReport(r);
-      const cu = await api("/api/custody");
-      $("custodyPanel").innerHTML = `<h2>عهدة الطيارين (نقدي لسه متسلمش)</h2>` + (cu.length ? cu.map(c => `<div class="user">
-        <div><b>${esc(c.name)}</b><div class="hint">${c.n} أوردر من ${new Date(c.since).toLocaleDateString("ar-EG", { day: "numeric", month: "short" })}</div></div>
-        <div class="row"><b class="num">${money(c.cash)}</b><button class="btn small" data-act="settle" data-driver="${c.driver_id}">استلمت العهدة</button></div></div>`).join("")
-        : `<p class="hint" style="margin:0">مفيش فلوس نقدي مع أي طيار.</p>`);
     } catch (e) { $("reportBody").innerHTML = `<div class="empty">${esc(e.message)}</div>`; }
   }
   $("r-from").addEventListener("change", loadReport);
@@ -459,14 +459,13 @@
         ${(() => { const names = [...new Set(r.collections_by_driver.map(x => x.name))]; const ms = METHODS.filter(m => r.collections_by_driver.some(x => x.method === m));
           return names.length ? `<div class="tablewrap"><table><thead><tr><th>الطيار</th>${ms.map(m => `<th>${m}</th>`).join("")}</tr></thead><tbody>${names.map(n => `<tr><td>${esc(n)}</td>${ms.map(m => { const x = r.collections_by_driver.find(y => y.name === n && y.method === m); return `<td class="n">${x ? money(x.total) : "—"}</td>`; }).join("")}</tr>`).join("")}</tbody></table></div>` : ""; })()}
       </div>
-      <div class="panel" id="custodyPanel"><h2>عهدة الطيارين (نقدي لسه متسلمش)</h2><p class="hint" style="margin:0">بيحمّل…</p></div>
       <div class="panel">
         <h2>أسباب الإلغاء</h2>
         ${r.reasons.length ? `<table><tbody>${r.reasons.map(x => `<tr><td>${esc(x.reason)}</td><td class="n">${x.n}</td></tr>`).join("")}</tbody></table>` : `<p class="hint" style="margin:0">مفيش إلغاءات في الفترة دي.</p>`}
       </div>
       <div class="panel">
         <h2>الطيارين</h2>
-        ${r.drivers.length ? `<div class="tablewrap"><table><thead><tr><th>الطيار</th><th>وصّل</th><th>متوسط الطريق</th><th>متأخر</th></tr></thead><tbody>${r.drivers.map(d => `<tr><td>${esc(d.name)}</td><td class="n">${d.n}</td><td class="n">${fmtMin(d.avg_road)}</td><td class="n">${d.late}</td></tr>`).join("")}</tbody></table></div>` : `<p class="hint" style="margin:0">لسه مفيش توصيلات مكتملة.</p>`}
+        ${r.drivers.length ? `<div class="tablewrap"><table><thead><tr><th>الطيار</th><th>وصّل</th><th>التوصيل</th><th>عمولته</th><th>متوسط الطريق</th><th>متأخر</th></tr></thead><tbody>${r.drivers.map(d => `<tr><td>${esc(d.name)}</td><td class="n">${d.n}</td><td class="n">${money(d.fees)}</td><td class="n">${money(d.share)}</td><td class="n">${fmtMin(d.avg_road)}</td><td class="n">${d.late}</td></tr>`).join("")}</tbody></table></div>` : `<p class="hint" style="margin:0">لسه مفيش توصيلات مكتملة.</p>`}
       </div>`;
   }
 
@@ -703,6 +702,68 @@
     $("map").scrollIntoView({ behavior: "smooth", block: "center" });
   }
 
+  /* ---------- driver accounts ---------- */
+  let ACC = null, rulesDraft = null;
+  async function loadAccounts() {
+    try { ACC = await api("/api/accounts"); } catch (e) { toast(e.message); return; }
+    rulesDraft = ACC.rules.map(r => Object.assign({}, r));
+    renderAccounts(); renderRules();
+  }
+  const shareOf = (fee, rules) => { fee = Number(fee) || 0; if (fee <= 0) return 0;
+    const t = rules.find(r => r.max === null || fee <= r.max) || rules[rules.length - 1];
+    return Math.round((t.mode === "fixed" ? Math.min(t.value, fee) : fee * t.value / 100) * 100) / 100; };
+  function renderAccounts() {
+    const byDriver = ACC.drivers.map(d => ({ d, os: ACC.orders.filter(o => o.driver_id === d.id) })).filter(x => x.os.length);
+    $("accDrivers").innerHTML = byDriver.length ? byDriver.map(({ d, os }) => {
+      const sum = f => os.reduce((a, o) => a + (Number(o[f]) || 0), 0);
+      const cash = os.filter(o => o.method === "نقدي").reduce((a, o) => a + (o.collected || 0), 0);
+      const other = os.filter(o => o.method !== "نقدي").reduce((a, o) => a + (o.collected || 0), 0);
+      const share = sum("share"), net = Math.round((cash - share) * 100) / 100;
+      return `<div class="panel acct">
+        <div class="row spread"><h2>${esc(d.name)}</h2><span class="hint">${os.length} أوردر من ${new Date(os[0].delivered_at).toLocaleString("ar-EG", { weekday: "long", hour: "numeric", minute: "2-digit" })}</span></div>
+        <div class="acct-sum">
+          <div><span>التوصيل</span><b>${money(sum("fee"))}</b></div>
+          <div><span>عمولته</span><b>${money(share)}</b></div>
+          <div><span>حصّل نقدي</span><b>${money(cash)}</b></div>
+          <div><span>فيزا/انستا/محفظة</span><b>${money(other)}</b></div>
+          <div class="acct-net ${net < 0 ? "neg" : ""}"><span>${net >= 0 ? "يسلّم للصيدلية" : "الصيدلية تدفعله"}</span><b>${money(Math.abs(net))}</b></div>
+        </div>
+        <div class="tablewrap"><table class="acct-t"><thead><tr><th>#</th><th>العميل</th><th>المبلغ</th><th>التوصيل</th><th>العمولة</th><th>التحصيل</th></tr></thead><tbody>
+          ${os.map(o => `<tr><td class="n">${o.no}</td><td>${esc(o.customer)}${o.day !== S.today ? ` <span class="hint">${new Date(o.day).toLocaleDateString("ar-EG", { day: "numeric", month: "short" })}</span>` : ""}</td>
+            <td class="n">${money(o.amount)}</td><td class="n">${money(o.fee)}</td>
+            <td><button class="btn small share-btn ${o.share_manual ? "manual" : ""}" data-act="editShare" data-id="${o.id}">${money(o.share)}${o.share_manual ? " ✎" : ""}</button></td>
+            <td class="n">${esc(o.method || "—")} ${money(o.collected)}</td></tr>`).join("")}
+        </tbody></table></div>
+        <button class="btn primary big" data-act="settle" data-driver="${d.id}">${net >= 0 ? `استلمت ${money(net)}: اقفل الحساب` : `دفعتله ${money(-net)}: اقفل الحساب`}</button>
+      </div>`;
+    }).join("") : `<div class="empty">مفيش حسابات مفتوحة. أول ما الطيارين يسلّموا أوردرات، عمولتهم والنقدي اللي معاهم هيظهروا هنا.</div>`;
+    $("accHistory").innerHTML = ACC.history.length ? ACC.history.map(h => `<button class="hist-row" data-act="settlement" data-id="${h.id}">
+        <span><b>${esc(h.driver || "—")}</b> · ${new Date(h.at).toLocaleString("ar-EG", { day: "numeric", month: "short", hour: "numeric", minute: "2-digit" })}</span>
+        <span class="hint">${h.n} أوردر · عمولة ${money(h.share)} · نقدي ${money(h.cash)} · ${h.net >= 0 ? "استلمت" : "دفعتله"} ${money(Math.abs(h.net))}${h.by ? " · " + esc(h.by) : ""}</span></button>`).join("")
+      : `<p class="hint" style="margin:0">لسه مفيش حسابات اتقفلت.</p>`;
+  }
+  function renderRules() {
+    const isAdmin = S.user.role === "admin", R = rulesDraft;
+    const rows = R.map((r, i) => `<div class="rule-row">
+      <span>${r.max === null ? (R.length > 1 ? `أكتر من ${R[R.length - 2].max} ج` : "أي توصيل") : `لحد`}</span>
+      ${r.max === null ? "" : `<input type="number" min="1" data-rule="${i}" data-k="max" value="${r.max}" ${isAdmin ? "" : "disabled"}><span>ج</span>`}
+      <span>←</span>
+      <input type="number" min="0" data-rule="${i}" data-k="value" value="${r.value}" ${isAdmin ? "" : "disabled"}>
+      <select data-rule="${i}" data-k="mode" ${isAdmin ? "" : "disabled"}><option value="pct" ${r.mode === "pct" ? "selected" : ""}>% من التوصيل</option><option value="fixed" ${r.mode === "fixed" ? "selected" : ""}>ج ثابت</option></select>
+      ${isAdmin && r.max !== null && R.length > 1 ? `<button class="btn small danger" data-act="delRule" data-i="${i}">شيل</button>` : ""}</div>`).join("");
+    const ex = [10, 15, 20, 25, 30, 40].map(f => `توصيل ${f} ← <b>${money(shareOf(f, R))}</b>`).join(" · ");
+    $("rulesBody").innerHTML = `<p class="hint" style="margin:0">العمولة بتتحسب لوحدها لما الطيار يسلّم الأوردر، من قيمة التوصيل المكتوبة على الأوردر. تقدر تعدّلها لأي أوردر بعينه من الجدول فوق قبل ما تقفل الحساب.</p>
+      ${rows}<div class="rule-ex">${ex}</div>
+      ${isAdmin ? `<div class="row"><button class="btn small" data-act="addRule">+ شريحة</button><button class="btn primary" data-act="saveRules">حفظ القواعد</button></div>` : `<p class="hint" style="margin:0">المدير بس يقدر يغيّر القواعد.</p>`}`;
+  }
+  $("rulesBody").addEventListener("input", e => {
+    const i = e.target.dataset.rule; if (i === undefined) return;
+    const k = e.target.dataset.k; rulesDraft[i][k] = k === "mode" ? e.target.value : (e.target.value === "" ? "" : Number(e.target.value));
+    const ex = [10, 15, 20, 25, 30, 40].map(f => `توصيل ${f} ← <b>${money(shareOf(f, rulesDraft.map(r => ({ ...r, max: r.max === "" ? null : r.max }))))}</b>`).join(" · ");
+    const el = $("rulesBody").querySelector(".rule-ex"); if (el) el.innerHTML = ex;
+  });
+  $("rulesBody").addEventListener("change", e => { if (e.target.dataset.k === "mode") $("rulesBody").dispatchEvent(new Event("input")); });
+
   /* ---------- users ---------- */
   async function loadUsers() {
     try { S.users = await api("/api/users"); renderUsers(); } catch (e) { toast(e.message); }
@@ -733,7 +794,7 @@
   }
 
   const editedOnRoad = o => !!(o.edited_at && o.out_at && ts(o.edited_at) > ts(o.out_at));
-  const FIELD_LABEL = { items: "الطلب", amount: "قيمة الطلب", delivery_fee: "التوصيل", payment: "طريقة الدفع", promise_min: "وعد التوصيل", address: "العنوان" };
+  const FIELD_LABEL = { items: "الطلب", amount: "المبلغ", delivery_fee: "منها توصيل", payment: "طريقة الدفع", promise_min: "وعد التوصيل", address: "العنوان" };
   const EDIT_NOTES = ["العميل زوّد أصناف", "العميل لغى صنف", "صنف مش متوفر", "تغيير الكمية", "تصحيح"];
   function editSheet(o) {
     sheet(`<div class="row spread"><h2>تعديل أوردر #${o.no}</h2><button class="btn small" data-act="closeSheet">قفل</button></div>
@@ -742,8 +803,8 @@
         <label>سبب التعديل<div class="methods" id="e-notes">${EDIT_NOTES.map(n => `<button type="button" class="chip" data-act="pickNote" data-n="${esc(n)}" aria-pressed="false">${esc(n)}</button>`).join("")}</div></label>
         <label>الطلب (زوّد أو امسح الأصناف)<textarea id="e-items" rows="5">${esc(o.items)}</textarea></label>
         <div class="grid2">
-          <label>قيمة الطلب (جنيه)<input id="e-amount" type="number" inputmode="decimal" min="0" value="${Number(o.amount) || ""}"></label>
-          <label>التوصيل (جنيه)<input id="e-fee" type="number" inputmode="decimal" min="0" value="${Number(o.delivery_fee) || ""}"></label>
+          <label>المبلغ شامل التوصيل (جنيه)<input id="e-amount" type="number" inputmode="decimal" min="0" value="${Number(o.amount) || ""}"></label>
+          <label>منها توصيل (جنيه)<input id="e-fee" type="number" inputmode="decimal" min="0" value="${Number(o.delivery_fee) || ""}"></label>
           <label>طريقة الدفع<select id="e-payment">${METHODS.map(m => `<option ${m === o.payment ? "selected" : ""}>${m}</option>`).join("")}</select></label>
           <label>وعد التوصيل (دقيقة)<select id="e-promise">${[30, 45, 60, 90, 120].map(m => `<option ${m === o.promise_min ? "selected" : ""}>${m}</option>`).join("")}</select></label>
         </div>
@@ -752,8 +813,8 @@
         <div class="row"><button class="btn primary big" style="flex:1" data-act="saveEdit" data-id="${o.id}">حفظ التعديل</button><button class="btn" data-act="closeSheet">رجوع</button></div>
         <p class="hint" style="margin:0">لو العميل لغى الأوردر كله، استخدم زرار "إلغاء" على الأوردر.</p>
       </div>`);
-    const upd = () => { const t = (Number($("e-amount").value) || 0) + (Number($("e-fee").value) || 0);
-      const old = (Number(o.amount) || 0) + (Number(o.delivery_fee) || 0);
+    const upd = () => { const t = Number($("e-amount").value) || 0;
+      const old = Number(o.amount) || 0;
       $("e-total").innerHTML = `الإجمالي على العميل: <b class="num">${money(t)}</b>${t !== old ? ` <span class="hint">(كان ${money(old)})</span>` : ""}`; };
     $("e-amount").addEventListener("input", upd); $("e-fee").addEventListener("input", upd); upd();
   }
@@ -788,7 +849,7 @@
     sheet(`<h2>تسليم أوردر #${o.no}</h2>
       <p class="hint" style="margin:0">اتحصّل إزاي؟</p>
       <div class="methods">${METHODS.map(m => `<button class="chip" data-act="pickMethod" data-id="${o.id}" data-m="${m}" aria-pressed="${m === def}">${m}</button>`).join("")}</div>
-      <label>المبلغ اللي اتحصّل (جنيه)<input id="collAmount" type="number" inputmode="decimal" min="0" value="${def === "مدفوع مسبقًا" ? 0 : ((Number(o.amount) + Number(o.delivery_fee || 0)) || "")}"></label>
+      <label>المبلغ اللي اتحصّل (جنيه)<input id="collAmount" type="number" inputmode="decimal" min="0" value="${def === "مدفوع مسبقًا" ? 0 : (Number(o.amount) || "")}"></label>
       <div class="row"><button class="btn primary big" style="flex:1" data-act="confirmDone" data-id="${o.id}">اتسلم واتحصّل</button><button class="btn" data-act="closeSheet">رجوع</button></div>`);
   }
 
@@ -816,6 +877,35 @@
           <button class="btn" data-act="closeSheet">رجوع</button>`); break;
       case "doCancel": closeSheet(); if (await act(id, { action: "cancel", reason: a.dataset.reason })) toast("اتلغى"); break;
       case "closeSheet": closeSheet(); break;
+      case "addRule": {
+        const fixed = rulesDraft.filter(r => r.max !== null), last = rulesDraft[rulesDraft.length - 1];
+        const next = (fixed.length ? fixed[fixed.length - 1].max : 15) + 5;
+        rulesDraft = [...fixed, { max: next, mode: "pct", value: 50 }, last]; renderRules(); break;
+      }
+      case "delRule": rulesDraft.splice(Number(a.dataset.i), 1); renderRules(); break;
+      case "saveRules":
+        try { const r = await api("/api/share-rules", { method: "PUT", body: { rules: rulesDraft } });
+          toast(r.updated ? `القواعد اتحفظت، واتحسبت تاني على ${r.updated} أوردر مفتوح` : "القواعد اتحفظت"); loadAccounts(); } catch (err) { toast(err.message); }
+        break;
+      case "editShare": {
+        const x = ACC && ACC.orders.find(y => y.id === id); if (!x) return;
+        sheet(`<h2>عمولة أوردر #${x.no}</h2><p class="hint" style="margin:0">${esc(x.customer)} · التوصيل ${money(x.fee)} · حسب القاعدة ${money(shareOf(x.fee, ACC.rules))}</p>
+          <label>عمولة الطيار على الأوردر ده (جنيه)<input id="shareVal" type="number" inputmode="decimal" min="0" value="${x.share ?? ""}"></label>
+          <div class="row"><button class="btn primary" data-act="saveShare" data-id="${x.id}">حفظ</button>${x.share_manual ? `<button class="btn" data-act="resetShare" data-id="${x.id}">رجّعها للقاعدة</button>` : ""}<button class="btn" data-act="closeSheet">رجوع</button></div>`);
+        $("shareVal").focus(); $("shareVal").select(); break;
+      }
+      case "saveShare": try { await api(`/api/orders/${id}/share`, { method: "PATCH", body: { share: $("shareVal").value } }); closeSheet(); toast("العمولة اتعدلت"); loadAccounts(); } catch (err) { toast(err.message); } break;
+      case "resetShare": try { await api(`/api/orders/${id}/share`, { method: "PATCH", body: { reset: true } }); closeSheet(); toast("رجعت للقاعدة"); loadAccounts(); } catch (err) { toast(err.message); } break;
+      case "settlement": {
+        const h = ACC && ACC.history.find(y => y.id === id); if (!h) return;
+        let rows = []; try { rows = await api(`/api/settlements/${id}`); } catch (err) { toast(err.message); return; }
+        sheet(`<div class="row spread"><h2>حساب ${esc(h.driver || "")}</h2><button class="btn small" data-act="closeSheet">قفل</button></div>
+          <p class="hint" style="margin:0">${new Date(h.at).toLocaleString("ar-EG")} · ${esc(h.by || "")}</p>
+          <div class="acct-sum"><div><span>التوصيل</span><b>${money(h.fees)}</b></div><div><span>عمولته</span><b>${money(h.share)}</b></div><div><span>نقدي</span><b>${money(h.cash)}</b></div><div class="acct-net ${h.net < 0 ? "neg" : ""}"><span>${h.net >= 0 ? "استلمت منه" : "دفعتله"}</span><b>${money(Math.abs(h.net))}</b></div></div>
+          <div class="sheet-scroll"><table class="acct-t"><thead><tr><th>#</th><th>العميل</th><th>المبلغ</th><th>التوصيل</th><th>العمولة</th><th>التحصيل</th></tr></thead><tbody>
+          ${rows.map(o => `<tr><td class="n">${o.no}</td><td>${esc(o.customer)}</td><td class="n">${money(o.amount)}</td><td class="n">${money(o.fee)}</td><td class="n">${money(o.share)}</td><td class="n">${esc(o.method || "")} ${money(o.collected)}</td></tr>`).join("")}</tbody></table></div>`);
+        break;
+      }
       case "edit": { await refresh(); const fresh = S.orders.find(x => x.id === id); if (fresh && !isFinal(fresh)) editSheet(fresh); else toast("الأوردر ده خلص أو اتلغى"); break; }
       case "history": if (o) historySheet(o); break;
       case "pickNote": a.setAttribute("aria-pressed", a.getAttribute("aria-pressed") === "true" ? "false" : "true"); break;
@@ -832,7 +922,7 @@
       case "pickMethod":
         document.querySelectorAll("[data-act=pickMethod]").forEach(b => b.setAttribute("aria-pressed", b === a));
         if (a.dataset.m === "مدفوع مسبقًا") $("collAmount").value = "0";
-        else if ($("collAmount").value === "0" && o) $("collAmount").value = (Number(o.amount) + Number(o.delivery_fee || 0)) || "";
+        else if ($("collAmount").value === "0" && o) $("collAmount").value = Number(o.amount) || "";
         break;
       case "confirmDone": {
         const m = document.querySelector("[data-act=pickMethod][aria-pressed=true]");
@@ -843,12 +933,13 @@
       }
       case "settle": {
         if (a.dataset.confirm !== "1") { a.dataset.confirm = "1"; a.textContent = "اتأكدت إن المبلغ وصلك؟ دوس تاني"; break; }
-        try { const r = await api(`/api/custody/${a.dataset.driver}/settle`, { method: "POST" }); toast(`اتسجل استلام ${money(r.cash)}`); loadReport(); } catch (err) { toast(err.message); }
+        try { const r = await api(`/api/accounts/${a.dataset.driver}/settle`, { method: "POST" });
+          toast(r.net >= 0 ? `الحساب اتقفل · استلمت ${money(r.net)}` : `الحساب اتقفل · دفعتله ${money(-r.net)}`); loadAccounts(); } catch (err) { toast(err.message); }
         break;
       }
       case "copy": {
         if (!o) return;
-        const total = Number(o.amount) + Number(o.delivery_fee || 0);
+        const total = Number(o.amount) || 0;
         if (o.status === "out") {
           a.disabled = true;
           let link = "";
@@ -967,7 +1058,8 @@
   function updateTotal() {
     const a = Number($("f-amount").value) || 0, f = Number($("f-fee").value) || 0;
     $("f-total").hidden = !(a || f);
-    $("f-total").innerHTML = `الإجمالي على العميل: <b class="num">${money(a + f)}</b>`;
+    $("f-total").innerHTML = `المطلوب من العميل: <b class="num">${money(a)}</b>${f ? ` · منها توصيل ${money(f)} · الطلب ${money(Math.max(0, a - f))}` : ""}` +
+      (f > a && a ? ` <b style="color:var(--late)">التوصيل أكبر من المبلغ، اتأكد إن المبلغ شامل التوصيل</b>` : "");
   }
   $("f-amount").addEventListener("input", updateTotal);
   $("f-fee").addEventListener("input", () => { $("f-fee").dataset.auto = ""; updateTotal(); });

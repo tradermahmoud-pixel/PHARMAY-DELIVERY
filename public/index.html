@@ -67,8 +67,8 @@
         <p class="hint" style="margin:0">مفيش لوكيشن؟ سجّل الأوردر، وبعدين دوس "اطلب اللوكيشن" تحت الأوردر ويتبعت للعميل لينك يبعت بيه موقعه بضغطة.</p>
         <label>الطلب<textarea id="f-items" placeholder="الأصناف، أو: الروشتة على الواتساب"></textarea></label>
         <div class="grid2">
-          <label>قيمة الطلب (جنيه)<input id="f-amount" type="number" inputmode="decimal" min="0"></label>
-          <label>التوصيل (جنيه)<input id="f-fee" type="number" inputmode="decimal" min="0" placeholder="0"></label>
+          <label>المبلغ على العميل شامل التوصيل (جنيه)<input id="f-amount" type="number" inputmode="decimal" min="0"></label>
+          <label>منها توصيل (جنيه)<input id="f-fee" type="number" inputmode="decimal" min="0" placeholder="0"></label>
           <label>جه منين<select id="f-source"><option>واتساب</option><option>تليفون</option></select></label>
           <label>وعد التوصيل (دقيقة)<select id="f-promise"><option>30</option><option>45</option><option selected>60</option><option>90</option></select></label>
           <label>طريقة الدفع<select id="f-payment"><option>نقدي</option><option>فيزا</option><option>انستاباي</option><option>محفظة</option><option>مدفوع مسبقًا</option></select></label>
@@ -106,6 +106,16 @@
         <label>إلى<input type="date" id="r-to"></label>
       </div>
       <div id="reportBody" class="list"></div>
+    </section>
+
+    <!-- Driver accounts -->
+    <section id="tab-accounts" class="list" hidden>
+      <div id="accDrivers" class="list"></div>
+      <details class="panel" id="rulesPanel">
+        <summary style="cursor:pointer;font-weight:600">قواعد عمولة الطيار من التوصيل</summary>
+        <div id="rulesBody" class="list"></div>
+      </details>
+      <div class="panel"><h2>الحسابات اللي اتقفلت</h2><div id="accHistory" class="list"></div></div>
     </section>
 
     <!-- Users -->

@@ -195,3 +195,24 @@ button.pill.editp{color:var(--warn);border-color:var(--warn);cursor:pointer;font
 .diff{font-weight:600;overflow-wrap:anywhere}
 .diff.add{color:var(--ok)}
 .diff.del{color:var(--late)}
+/* driver accounts */
+.acct-sum{display:grid;grid-template-columns:repeat(auto-fit,minmax(120px,1fr));gap:8px}
+.acct-sum > div{background:var(--bg);border-radius:8px;padding:8px 10px;display:flex;flex-direction:column}
+.acct-sum span{font-size:.75rem;color:var(--muted)}
+.acct-sum b{font-family:var(--display);font-size:1.1rem;font-variant-numeric:tabular-nums}
+.acct-sum .acct-net{background:var(--accent-soft)}
+.acct-sum .acct-net b{color:var(--accent)}
+.acct-sum .acct-net.neg{background:var(--warn-soft)}
+.acct-sum .acct-net.neg b{color:var(--warn)}
+.acct-t td,.acct-t th{white-space:nowrap}
+.share-btn{padding:3px 8px;font-variant-numeric:tabular-nums}
+.share-btn.manual{border-color:var(--warn);color:var(--warn)}
+.rule-row{display:flex;flex-wrap:wrap;gap:6px;align-items:center;font-size:.9rem}
+.rule-row input{width:80px}
+.rule-row select{width:auto}
+.rule-ex{font-size:.85rem;color:var(--muted);background:var(--bg);border-radius:8px;padding:8px 10px;line-height:1.9}
+.rule-ex b{color:var(--ink)}
+.hist-row{display:flex;flex-direction:column;align-items:flex-start;gap:2px;text-align:right;background:none;border:0;border-bottom:1px solid var(--line);padding:8px 2px;font:inherit;color:var(--ink);cursor:pointer;width:100%}
+.hist-row:hover{background:var(--accent-soft)}
+.acct-mini{display:flex;flex-wrap:wrap;gap:4px 14px}
+@media (min-width:1100px){#accDrivers{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px;align-items:start}#accDrivers > .empty{grid-column:1/-1}}

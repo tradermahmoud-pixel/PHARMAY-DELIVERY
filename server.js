@@ -171,6 +171,23 @@ async function migrate() {
       note TEXT NOT NULL DEFAULT ''
     );
     CREATE INDEX IF NOT EXISTS order_changes_order_idx ON order_changes(order_id);
+    -- driver commission (from the delivery fee) and end-of-day settlements
+    ALTER TABLE orders ADD COLUMN IF NOT EXISTS driver_share NUMERIC(8,2);
+    ALTER TABLE orders ADD COLUMN IF NOT EXISTS share_manual BOOLEAN NOT NULL DEFAULT FALSE;
+    CREATE TABLE IF NOT EXISTS driver_settlements (
+      id SERIAL PRIMARY KEY,
+      driver_id INT REFERENCES users(id) ON DELETE SET NULL,
+      by_user INT REFERENCES users(id) ON DELETE SET NULL,
+      at TIMESTAMPTZ NOT NULL DEFAULT now(),
+      n INT NOT NULL DEFAULT 0,
+      fees NUMERIC(10,2) NOT NULL DEFAULT 0,
+      share NUMERIC(10,2) NOT NULL DEFAULT 0,
+      cash NUMERIC(12,2) NOT NULL DEFAULT 0,
+      other NUMERIC(12,2) NOT NULL DEFAULT 0,
+      net NUMERIC(12,2) NOT NULL DEFAULT 0,
+      note TEXT NOT NULL DEFAULT ''
+    );
+    ALTER TABLE orders ADD COLUMN IF NOT EXISTS settlement_id INT REFERENCES driver_settlements(id) ON DELETE SET NULL;
     -- old payment labels → new ones
     UPDATE orders SET payment = 'نقدي' WHERE payment = 'كاش';
     UPDATE orders SET payment = 'محفظة' WHERE payment = 'فودافون كاش / انستاباي';
@@ -389,6 +406,34 @@ async function getSettings() {
 }
 async function setSetting(key, value) {
   await q(`INSERT INTO settings(key, value) VALUES ($1,$2) ON CONFLICT (key) DO UPDATE SET value=EXCLUDED.value`, [key, value == null ? "" : String(value)]);
+}
+
+/* ---- driver commission rules: first tier whose "max" covers the delivery fee wins ---- */
+const DEFAULT_RULES = [{ max: 20, mode: "pct", value: 50 }, { max: 25, mode: "pct", value: 50 }, { max: null, mode: "pct", value: 50 }];
+function cleanRules(list) {
+  if (!Array.isArray(list) || !list.length) return null;
+  const out = [];
+  for (const r of list.slice(0, 10)) {
+    const mode = r.mode === "fixed" ? "fixed" : "pct";
+    const value = num(r.value); const max = r.max === null || r.max === "" || r.max === undefined ? null : num(r.max);
+    if (value === null || value < 0 || (mode === "pct" && value > 100) || (mode === "fixed" && value > 1000)) return null;
+    if (max !== null && (max <= 0 || max > 10000)) return null;
+    out.push({ max, mode, value });
+  }
+  const fixed = out.filter(r => r.max !== null).sort((a, b) => a.max - b.max);
+  const last = out.find(r => r.max === null) || { max: null, mode: "pct", value: 50 };
+  return [...fixed, last];
+}
+async function getRules() {
+  const r = (await q(`SELECT value FROM settings WHERE key='share_rules'`)).rows[0];
+  try { return cleanRules(JSON.parse(r.value)) || DEFAULT_RULES; } catch (e) { return DEFAULT_RULES; }
+}
+function shareFor(fee, rules) {
+  fee = Number(fee) || 0;
+  if (fee <= 0) return 0;
+  const t = rules.find(r => r.max === null || fee <= r.max) || rules[rules.length - 1];
+  const v = t.mode === "fixed" ? Math.min(t.value, fee) : fee * t.value / 100;
+  return Math.round(v * 100) / 100;
 }
 
 /* ---------------- app ---------------- */
@@ -615,11 +660,12 @@ app.patch("/api/orders/:id", auth, wrap(async (req, res) => {
       if (isDriver && o.driver_id !== req.user.id) return res.status(403).json({ error: "الأوردر ده مش معاك" });
       {
         const method = METHODS.includes(collected_method) ? collected_method : (METHODS.includes(o.payment) ? o.payment : "نقدي");
-        let amount = collected_amount === undefined || collected_amount === "" ? Number(o.amount) + Number(o.delivery_fee || 0) : Number(collected_amount);
+        let amount = collected_amount === undefined || collected_amount === "" ? Number(o.amount) : Number(collected_amount);
         if (method === "مدفوع مسبقًا") amount = 0;
         if (!isFinite(amount) || amount < 0 || amount > 1000000) return res.status(400).json({ error: "المبلغ مش مظبوط" });
-        sql = `UPDATE orders SET status='done', delivered_at=now(), collected_method=$2, collected_amount=$3, updated_at=now() WHERE id=$1`;
-        params = [id, method, amount];
+        sql = `UPDATE orders SET status='done', delivered_at=now(), collected_method=$2, collected_amount=$3,
+          driver_share = CASE WHEN share_manual THEN driver_share ELSE $4 END, updated_at=now() WHERE id=$1`;
+        params = [id, method, amount, shareFor(o.delivery_fee, await getRules())];
       }
       break;
     case "cancel":
@@ -1043,22 +1089,74 @@ app.get("/api/public/track/:token", publicLimit, wrap(async (req, res) => {
 }));
 app.get("/t/:token", (req, res) => res.sendFile(path.join(__dirname, "public", "track.html")));
 
-/* ---- collections: cash each driver is holding ---- */
-app.get("/api/custody", auth, wrap(async (req, res) => {
+/* ---- driver accounts: commission and cash, settled at the end of the day ---- */
+const OPEN = `o.status='done' AND o.driver_id IS NOT NULL AND o.settlement_id IS NULL AND o.settled_at IS NULL`;
+const share = `coalesce(o.driver_share, 0)`;
+const TOTALS = `count(*)::int AS n, coalesce(sum(o.delivery_fee),0)::float AS fees, coalesce(sum(${share}),0)::float AS share,
+  coalesce(sum(o.collected_amount) FILTER (WHERE o.collected_method='نقدي'),0)::float AS cash,
+  coalesce(sum(o.collected_amount) FILTER (WHERE o.collected_method<>'نقدي'),0)::float AS other,
+  min(o.delivered_at) AS since`;
+// the driver's own banner (and the old "custody" name, kept for older app versions)
+app.get(["/api/custody", "/api/my-account"], auth, wrap(async (req, res) => {
   const params = []; let where = "";
   if (req.user.role === "driver") { params.push(req.user.id); where = "AND o.driver_id=$1"; }
-  const { rows } = await q(`SELECT u.id AS driver_id, u.name, count(*)::int AS n, coalesce(sum(o.collected_amount),0)::float AS cash,
-      min(o.delivered_at) AS since
-    FROM orders o JOIN users u ON u.id=o.driver_id
-    WHERE o.status='done' AND o.collected_method='نقدي' AND o.settled_at IS NULL ${where}
-    GROUP BY u.id, u.name ORDER BY cash DESC`, params);
+  const { rows } = await q(`SELECT u.id AS driver_id, u.name, ${TOTALS} FROM orders o JOIN users u ON u.id=o.driver_id
+    WHERE ${OPEN} ${where} GROUP BY u.id, u.name ORDER BY u.name`, params);
+  rows.forEach(r => (r.net = Math.round((r.cash - r.share) * 100) / 100));
   res.json(rows);
 }));
-app.post("/api/custody/:driverId/settle", auth, staffOnly, wrap(async (req, res) => {
-  const { rows } = await q(`UPDATE orders SET settled_at=now(), settled_by=$2
-    WHERE driver_id=$1 AND status='done' AND collected_method='نقدي' AND settled_at IS NULL
-    RETURNING collected_amount`, [Number(req.params.driverId), req.user.id]);
-  res.json({ n: rows.length, cash: rows.reduce((a, r) => a + Number(r.collected_amount || 0), 0) });
+app.get("/api/accounts", auth, staffOnly, wrap(async (req, res) => {
+  const drivers = (await q(`SELECT id, name FROM users WHERE role='driver' ORDER BY active DESC, name`)).rows;
+  const orders = (await q(`SELECT o.id, o.no, o.day, o.customer, o.area, o.amount::float AS amount, o.delivery_fee::float AS fee,
+      o.driver_share::float AS share, o.share_manual, o.collected_method AS method, o.collected_amount::float AS collected, o.delivered_at, o.driver_id
+    FROM orders o WHERE ${OPEN} ORDER BY o.delivered_at`)).rows;
+  const history = (await q(`SELECT s.*, s.fees::float AS fees, s.share::float AS share, s.cash::float AS cash, s.other::float AS other, s.net::float AS net,
+      d.name AS driver, b.name AS by FROM driver_settlements s LEFT JOIN users d ON d.id=s.driver_id LEFT JOIN users b ON b.id=s.by_user
+    ORDER BY s.at DESC LIMIT 40`)).rows;
+  res.json({ rules: await getRules(), drivers, orders, history });
+}));
+app.put("/api/share-rules", auth, allow("admin"), wrap(async (req, res) => {
+  const rules = cleanRules(req.body && req.body.rules);
+  if (!rules) return res.status(400).json({ error: "القواعد مش مظبوطة. النسبة من 0 لـ 100، والمبلغ الثابت رقم موجب." });
+  await setSetting("share_rules", JSON.stringify(rules));
+  // apply to delivered orders that aren't settled yet (unless someone set their share by hand)
+  const open = (await q(`SELECT id, delivery_fee FROM orders o WHERE ${OPEN} AND NOT o.share_manual`)).rows;
+  for (const o of open) await q(`UPDATE orders SET driver_share=$2 WHERE id=$1`, [o.id, shareFor(o.delivery_fee, rules)]);
+  res.json({ rules, updated: open.length });
+}));
+app.patch("/api/orders/:id/share", auth, staffOnly, wrap(async (req, res) => {
+  const id = Number(req.params.id); const b = req.body || {};
+  const o = (await q(`SELECT * FROM orders o WHERE id=$1 AND ${OPEN}`, [id])).rows[0];
+  if (!o) return res.status(400).json({ error: "الأوردر ده اتقفل حسابه أو لسه ماتسلمش" });
+  if (b.reset) {
+    await q(`UPDATE orders SET share_manual=false, driver_share=$2 WHERE id=$1`, [id, shareFor(o.delivery_fee, await getRules())]);
+  } else {
+    const v = num(b.share);
+    if (v === null || v < 0 || v > 5000) return res.status(400).json({ error: "المبلغ مش مظبوط" });
+    await q(`UPDATE orders SET share_manual=true, driver_share=$2 WHERE id=$1`, [id, v]);
+  }
+  res.json({ ok: true });
+}));
+app.post(["/api/accounts/:driverId/settle", "/api/custody/:driverId/settle"], auth, staffOnly, wrap(async (req, res) => {
+  const driverId = Number(req.params.driverId);
+  const conn = await pool.connect();
+  try {
+    await conn.query("BEGIN");
+    const t = (await conn.query(`SELECT ${TOTALS} FROM orders o WHERE ${OPEN} AND o.driver_id=$1`, [driverId])).rows[0];
+    if (!t.n) { await conn.query("ROLLBACK"); return res.status(400).json({ error: "مفيش أوردرات مفتوحة للطيار ده" }); }
+    const net = Math.round((t.cash - t.share) * 100) / 100;
+    const sid = (await conn.query(`INSERT INTO driver_settlements(driver_id, by_user, n, fees, share, cash, other, net, note)
+      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING id`, [driverId, req.user.id, t.n, t.fees, t.share, t.cash, t.other, net, String((req.body || {}).note || "").slice(0, 200)])).rows[0].id;
+    await conn.query(`UPDATE orders o SET settlement_id=$2, settled_at=now(), settled_by=$3 WHERE ${OPEN} AND o.driver_id=$1`, [driverId, sid, req.user.id]);
+    await conn.query("COMMIT");
+    res.json({ id: sid, n: t.n, share: t.share, cash: t.cash, net });
+  } catch (e) { await conn.query("ROLLBACK"); throw e; }
+  finally { conn.release(); }
+}));
+app.get("/api/settlements/:id", auth, staffOnly, wrap(async (req, res) => {
+  const { rows } = await q(`SELECT o.no, o.day, o.customer, o.amount::float AS amount, o.delivery_fee::float AS fee, o.driver_share::float AS share,
+    o.collected_method AS method, o.collected_amount::float AS collected FROM orders o WHERE o.settlement_id=$1 ORDER BY o.delivered_at`, [Number(req.params.id)]);
+  res.json(rows);
 }));
 
 /* ---- report ---- */
@@ -1078,7 +1176,7 @@ app.get("/api/report", auth, allow("admin", "staff"), wrap(async (req, res) => {
     FROM orders WHERE day BETWEEN $1 AND $2`, [from, to]);
   const reasons = await q(`SELECT coalesce(cancel_reason,'غير محدد') AS reason, count(*)::int AS n FROM orders
     WHERE day BETWEEN $1 AND $2 AND status='cancel' GROUP BY 1 ORDER BY 2 DESC`, [from, to]);
-  const drivers = await q(`SELECT u.name, count(*)::int AS n,
+  const drivers = await q(`SELECT u.name, count(*)::int AS n, coalesce(sum(o.delivery_fee),0)::float AS fees, coalesce(sum(o.driver_share),0)::float AS share,
       round(avg(${m("o.out_at", "o.delivered_at")}))::int AS avg_road,
       count(*) FILTER (WHERE ${m("o.created_at", "o.delivered_at")} > o.promise_min)::int AS late
     FROM orders o JOIN users u ON u.id=o.driver_id
