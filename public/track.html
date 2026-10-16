@@ -1,0 +1,102 @@
+<!doctype html>
+<html lang="ar" dir="rtl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>تتبع أوردرك</title>
+<meta name="theme-color" content="#0E7C66">
+<meta name="robots" content="noindex">
+<link rel="icon" href="/icon-192.png">
+<link rel="stylesheet" href="/vendor/leaflet/leaflet.css">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans+Arabic:wght@400;600&family=Readex+Pro:wght@500;700&display=swap">
+<style>
+:root{--bg:#EEF3F1;--surface:#fff;--ink:#12302C;--muted:#5B716D;--line:#D6E1DD;--accent:#0E7C66;--accent-soft:#DDF0EA;--out:#3A6FB0;--ok:#2F8F4E;color-scheme:light}
+@media (prefers-color-scheme:dark){:root{--bg:#0D1817;--surface:#152321;--ink:#E3EEEB;--muted:#93A8A3;--line:#263936;--accent:#3DBB9A;--accent-soft:#183A33;--out:#7AA7E0;--ok:#5CC27A;color-scheme:dark}}
+*{box-sizing:border-box}
+html,body{height:100%}
+body{margin:0;background:var(--bg);color:var(--ink);font-family:"IBM Plex Sans Arabic",Tahoma,sans-serif;display:flex;flex-direction:column}
+#map{flex:1;min-height:52vh;background:var(--line)}
+.sheet{background:var(--surface);border-top:1px solid var(--line);border-radius:18px 18px 0 0;margin-top:-18px;position:relative;z-index:500;
+  padding:18px max(18px,env(safe-area-inset-right)) calc(20px + env(safe-area-inset-bottom)) max(18px,env(safe-area-inset-left));display:flex;flex-direction:column;gap:10px}
+.brand{display:flex;align-items:center;gap:10px}
+.brand img{border-radius:10px}
+h1{font-family:"Readex Pro","IBM Plex Sans Arabic",sans-serif;font-size:1.25rem;margin:0;text-wrap:balance}
+p{margin:0;color:var(--muted);line-height:1.6}
+.big{font-family:"Readex Pro",sans-serif;font-size:1.6rem;font-variant-numeric:tabular-nums;color:var(--out)}
+.steps{display:flex;gap:6px}
+.steps i{flex:1;height:6px;border-radius:3px;background:var(--line)}
+.steps i.on{background:var(--accent)}
+.done{color:var(--ok)}
+.drv{width:40px;height:40px;border-radius:50%;background:var(--out);border:3px solid #fff;box-shadow:0 2px 8px rgba(0,0,0,.35);display:grid;place-items:center;color:#fff;font:700 15px "Readex Pro",sans-serif}
+.home{width:30px;height:30px;border-radius:50% 50% 50% 0;transform:rotate(-45deg);background:var(--accent);border:3px solid #fff;box-shadow:0 2px 6px rgba(0,0,0,.3)}
+.leaflet-container{font-family:inherit}
+.shop{font-size:.8rem;color:var(--muted)}
+.shoppin{width:30px;height:30px;border-radius:8px;background:var(--accent);border:3px solid #fff;box-shadow:0 2px 6px rgba(0,0,0,.3);color:#fff;display:grid;place-items:center;font:700 18px/1 "Readex Pro",sans-serif}
+</style>
+</head>
+<body>
+<div id="map" dir="ltr" aria-label="خريطة مكان الطيار"></div>
+<div class="sheet">
+  <div class="brand"><img src="/icon-192.png" alt="" width="36" height="36"><div><div class="shop" id="shop"></div><h1 id="title">بيحمّل…</h1></div></div>
+  <div class="steps" aria-hidden="true"><i id="s1"></i><i id="s2"></i><i id="s3"></i></div>
+  <div id="eta" class="big" hidden></div>
+  <p id="sub"></p>
+</div>
+<script src="/vendor/leaflet/leaflet.js"></script>
+<script>
+(function(){
+  var token = location.pathname.split("/").pop();
+  var $ = function(id){ return document.getElementById(id); };
+  var map = L.map("map", { zoomControl: false, attributionControl: true }).setView([30.06, 31.33], 13);
+  L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", { maxZoom: 19, attribution: "&copy; OpenStreetMap" }).addTo(map);
+  var drv = null, home = null, line = null, shop = null, fitted = false, timer = null;
+  function steps(n){ ["s1","s2","s3"].forEach(function(id,i){ $(id).className = i < n ? "on" : ""; }); }
+  function ago(iso, now){ var s = Math.max(0, Math.round((Date.parse(now) - Date.parse(iso)) / 1000)); return s < 60 ? s + " ثانية" : Math.round(s/60) + " دقيقة"; }
+  function load(){
+    fetch("/api/public/track/" + encodeURIComponent(token)).then(function(r){ return r.json().then(function(d){ return { ok: r.ok, d: d }; }); }).then(function(x){
+      var d = x.d;
+      if (!x.ok) { $("title").textContent = "اللينك ده انتهى"; $("sub").textContent = "لو محتاج تسأل على أوردرك كلّم الصيدلية."; steps(0); clearInterval(timer); return; }
+      if (d.pharmacy) { $("shop").textContent = d.pharmacy; document.title = "تتبع أوردرك · " + d.pharmacy; }
+      if (d.shop && !shop) { shop = L.marker([d.shop.lat, d.shop.lng], { icon: L.divIcon({ className: "", html: '<div class="shoppin">+</div>', iconSize: [30,30], iconAnchor: [15,15] }) }).addTo(map); }
+      if (d.dest && !home) { home = L.marker([d.dest.lat, d.dest.lng], { icon: L.divIcon({ className: "", html: '<div class="home"></div>', iconSize: [30,30], iconAnchor: [15,30] }) }).addTo(map); }
+      if (d.status === "done") {
+        steps(3); $("title").textContent = "أوردرك اتسلم"; $("title").className = "done"; $("eta").hidden = true;
+        $("sub").textContent = "شكرًا إنك طلبت من الصيدلية. نتمنالك الشفا."; clearInterval(timer);
+        if (drv) { map.removeLayer(drv); drv = null; } if (line) { map.removeLayer(line); line = null; }
+        if (home && !fitted) map.setView(home.getLatLng(), 16);
+        return;
+      }
+      if (d.status === "cancel") { steps(0); $("title").textContent = "الأوردر ده اتلغى"; $("sub").textContent = "لو فيه حاجة كلّم الصيدلية."; $("eta").hidden = true; clearInterval(timer); return; }
+      if (d.status !== "out") {
+        steps(1); $("title").textContent = "أهلًا " + d.name + "، أوردرك #" + d.no + " بيتجهز";
+        $("sub").textContent = "أول ما يخرج مع الطيار هتشوف مكانه على الخريطة هنا."; $("eta").hidden = true;
+        if (!fitted && home && shop) { map.fitBounds([home.getLatLng(), shop.getLatLng()], { padding: [50, 50], maxZoom: 16 }); fitted = true; }
+        else if (!fitted && (home || shop)) { map.setView((home || shop).getLatLng(), 15); fitted = true; }
+        return;
+      }
+      steps(2);
+      $("title").textContent = "أوردرك #" + d.no + " في الطريق";
+      if (d.driver) {
+        var p = [d.driver.lat, d.driver.lng];
+        if (!drv) drv = L.marker(p, { zIndexOffset: 1000, icon: L.divIcon({ className: "", html: '<div class="drv">' + (d.driver.name || "?").charAt(0) + '</div>', iconSize: [40,40], iconAnchor: [20,20] }) }).addTo(map);
+        else drv.setLatLng(p);
+        if (home) { if (line) line.setLatLngs([p, home.getLatLng()]); else line = L.polyline([p, home.getLatLng()], { color: "#3A6FB0", weight: 3, dashArray: "6 8" }).addTo(map); }
+        if (!fitted) { home ? map.fitBounds([p, home.getLatLng()], { padding: [50, 50], maxZoom: 16 }) : map.setView(p, 15); fitted = true; }
+        if (d.km != null) {
+          var mins = Math.max(2, Math.round(d.km / 22 * 60));
+          $("eta").hidden = false; $("eta").textContent = (d.km < 1 ? Math.round(d.km * 1000 / 50) * 50 + " متر" : d.km + " كم") + " · حوالي " + mins + " دقيقة";
+        } else $("eta").hidden = true;
+        $("sub").textContent = "الطيار " + (d.driver.name || "") + " جاي لك. مكانه بيتحدث لوحده، آخر تحديث من " + ago(d.driver.at, d.now) + ".";
+      } else {
+        $("eta").hidden = true;
+        $("sub").textContent = "الطيار خرج بأوردرك، ومكانه هيظهر هنا أول ما يوصلنا.";
+        if (home && !fitted) { map.setView(home.getLatLng(), 15); fitted = true; }
+      }
+    }).catch(function(){ $("sub").textContent = "مفيش نت، بيحاول تاني…"; });
+  }
+  load(); timer = setInterval(function(){ if (!document.hidden) load(); }, 10000);
+  document.addEventListener("visibilitychange", function(){ if (!document.hidden) load(); });
+})();
+</script>
+</body>
+</html>

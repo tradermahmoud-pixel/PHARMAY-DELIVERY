@@ -109,6 +109,48 @@ async function migrate() {
     ALTER TABLE orders ADD COLUMN IF NOT EXISTS settled_at TIMESTAMPTZ;
     ALTER TABLE orders ADD COLUMN IF NOT EXISTS settled_by INT REFERENCES users(id) ON DELETE SET NULL;
     CREATE INDEX IF NOT EXISTS orders_custody_idx ON orders(driver_id) WHERE settled_at IS NULL AND collected_method = 'نقدي';
+    -- customer details from the pharmacy system (Genius)
+    ALTER TABLE clients ADD COLUMN IF NOT EXISTS code TEXT;
+    CREATE UNIQUE INDEX IF NOT EXISTS clients_code_uidx ON clients(code);
+    ALTER TABLE clients ADD COLUMN IF NOT EXISTS area TEXT NOT NULL DEFAULT '';
+    ALTER TABLE clients ADD COLUMN IF NOT EXISTS delivery_fee NUMERIC(8,2);
+    ALTER TABLE clients ADD COLUMN IF NOT EXISTS branch TEXT NOT NULL DEFAULT '';
+    ALTER TABLE clients ADD COLUMN IF NOT EXISTS invoices INT NOT NULL DEFAULT 0;
+    ALTER TABLE clients ADD COLUMN IF NOT EXISTS first_purchase TIMESTAMPTZ;
+    ALTER TABLE clients ADD COLUMN IF NOT EXISTS last_purchase TIMESTAMPTZ;
+    ALTER TABLE clients ADD COLUMN IF NOT EXISTS spend_12m NUMERIC(12,2) NOT NULL DEFAULT 0;
+    ALTER TABLE clients ADD COLUMN IF NOT EXISTS status TEXT NOT NULL DEFAULT '';
+    -- a phone can belong to more than one customer (family members sharing a number)
+    DO $$ BEGIN
+      IF (SELECT count(*) FROM pg_index i JOIN pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = ANY(i.indkey)
+          WHERE i.indrelid = 'client_phones'::regclass AND i.indisprimary) = 1 THEN
+        ALTER TABLE client_phones DROP CONSTRAINT client_phones_pkey;
+        ALTER TABLE client_phones ADD PRIMARY KEY (phone, client_id);
+      END IF;
+    END $$;
+    CREATE INDEX IF NOT EXISTS client_phones_phone_idx ON client_phones(phone);
+    CREATE INDEX IF NOT EXISTS clients_recent_idx ON clients(last_purchase DESC NULLS LAST);
+    ALTER TABLE client_addresses ADD COLUMN IF NOT EXISTS area TEXT NOT NULL DEFAULT '';
+    ALTER TABLE orders ADD COLUMN IF NOT EXISTS delivery_fee NUMERIC(8,2) NOT NULL DEFAULT 0;
+    ALTER TABLE orders ADD COLUMN IF NOT EXISTS area TEXT NOT NULL DEFAULT '';
+    ALTER TABLE orders ADD COLUMN IF NOT EXISTS track_token TEXT UNIQUE;
+    -- live driver location
+    ALTER TABLE users ADD COLUMN IF NOT EXISTS last_lat DOUBLE PRECISION;
+    ALTER TABLE users ADD COLUMN IF NOT EXISTS last_lng DOUBLE PRECISION;
+    ALTER TABLE users ADD COLUMN IF NOT EXISTS last_acc REAL;
+    ALTER TABLE users ADD COLUMN IF NOT EXISTS last_speed REAL;
+    ALTER TABLE users ADD COLUMN IF NOT EXISTS last_battery REAL;
+    ALTER TABLE users ADD COLUMN IF NOT EXISTS last_at TIMESTAMPTZ;
+    CREATE TABLE IF NOT EXISTS driver_positions (
+      id BIGSERIAL PRIMARY KEY,
+      driver_id INT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      lat DOUBLE PRECISION NOT NULL,
+      lng DOUBLE PRECISION NOT NULL,
+      acc REAL,
+      at TIMESTAMPTZ NOT NULL DEFAULT now()
+    );
+    CREATE INDEX IF NOT EXISTS driver_positions_idx ON driver_positions(driver_id, at);
+    CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL DEFAULT '');
     -- old payment labels → new ones
     UPDATE orders SET payment = 'نقدي' WHERE payment = 'كاش';
     UPDATE orders SET payment = 'محفظة' WHERE payment = 'فودافون كاش / انستاباي';
@@ -241,18 +283,21 @@ function splitPhones(v) {
   return out;
 }
 
+const CLIENT_COLS = `id, name, notes, orders_count, code, area, delivery_fee::float AS delivery_fee, branch, invoices,
+  first_purchase, last_purchase, spend_12m::float AS spend_12m, status`;
 async function clientById(id) {
-  const c = (await q(`SELECT id, name, notes, orders_count FROM clients WHERE id=$1`, [id])).rows[0];
+  const c = (await q(`SELECT ${CLIENT_COLS} FROM clients WHERE id=$1`, [id])).rows[0];
   if (!c) return null;
   c.phones = (await q(`SELECT phone FROM client_phones WHERE client_id=$1 ORDER BY phone`, [id])).rows.map(r => r.phone);
-  c.addresses = (await q(`SELECT id, label, address, lat, lng, location_url, last_used_at FROM client_addresses
+  c.addresses = (await q(`SELECT id, label, address, area, lat, lng, location_url, last_used_at FROM client_addresses
     WHERE client_id=$1 ORDER BY last_used_at DESC NULLS LAST, id DESC`, [id])).rows;
   return c;
 }
 async function clientIdByPhone(phone) {
   const p = normPhone(phone);
   if (p.length < 8) return null;
-  const r = (await q(`SELECT client_id FROM client_phones WHERE phone=$1`, [p])).rows[0];
+  const r = (await q(`SELECT p.client_id FROM client_phones p JOIN clients c ON c.id=p.client_id WHERE p.phone=$1
+    ORDER BY c.last_purchase DESC NULLS LAST, c.updated_at DESC LIMIT 1`, [p])).rows[0];
   return r ? r.client_id : null;
 }
 async function addPhone(clientId, phone) {
@@ -287,6 +332,25 @@ async function locationToAddress(orderId, lat, lng, location_url) {
     const a = await upsertAddress(o.client_id, { address: o.address, lat, lng, location_url });
     if (a.id) await q(`UPDATE orders SET address_id=$2 WHERE id=$1`, [orderId, a.id]);
   }
+}
+
+// Straight-line distance in km
+function km(aLat, aLng, bLat, bLng) {
+  const R = 6371, r = x => x * Math.PI / 180;
+  const d = Math.sin(r(bLat - aLat) / 2) ** 2 + Math.cos(r(aLat)) * Math.cos(r(bLat)) * Math.sin(r(bLng - aLng) / 2) ** 2;
+  return 2 * R * Math.asin(Math.sqrt(d));
+}
+const num = (v, d = null) => (v === null || v === undefined || v === "" || !isFinite(Number(v)) ? d : Number(v));
+const toDate = v => { if (!v) return null; const d = new Date(v); return isNaN(d) ? null : d.toISOString(); };
+
+/* ---- pharmacy settings (name, location) ---- */
+async function getSettings() {
+  const rows = (await q(`SELECT key, value FROM settings`)).rows;
+  const m = Object.fromEntries(rows.map(r => [r.key, r.value]));
+  return { name: m.name || "توصيل الصيدلية", lat: num(m.lat), lng: num(m.lng) };
+}
+async function setSetting(key, value) {
+  await q(`INSERT INTO settings(key, value) VALUES ($1,$2) ON CONFLICT (key) DO UPDATE SET value=EXCLUDED.value`, [key, value == null ? "" : String(value)]);
 }
 
 /* ---------------- app ---------------- */
@@ -330,6 +394,30 @@ app.post("/api/logout", auth, wrap(async (req, res) => {
 }));
 
 app.get("/api/me", auth, (req, res) => res.json({ user: req.user, today: todayCairo() }));
+
+app.get("/api/public/settings", wrap(async (req, res) => res.json(await getSettings())));
+app.put("/api/settings", auth, allow("admin"), wrap(async (req, res) => {
+  const b = req.body || {};
+  if (b.name !== undefined) {
+    const name = String(b.name).trim().slice(0, 60);
+    if (!name) return res.status(400).json({ error: "اكتب اسم الصيدلية" });
+    await setSetting("name", name);
+  }
+  if (b.lat !== undefined && b.lng !== undefined) {
+    const lat = num(b.lat), lng = num(b.lng);
+    if (lat === null || lng === null || Math.abs(lat) > 90 || Math.abs(lng) > 180) return res.status(400).json({ error: "الموقع مش واضح" });
+    await setSetting("lat", lat); await setSetting("lng", lng);
+  } else if (b.location !== undefined) {
+    if (!String(b.location).trim()) { await setSetting("lat", ""); await setSetting("lng", ""); }
+    else {
+      const loc = await parseLocation(b.location);
+      if (loc.error) return res.status(400).json({ error: loc.error });
+      if (loc.lat == null) return res.status(400).json({ error: "اللينك ده مفيهوش إحداثيات. افتحه على جوجل ماب وانسخ اللينك الطويل، أو استخدم موقعك الحالي وانت في الصيدلية." });
+      await setSetting("lat", loc.lat); await setSetting("lng", loc.lng);
+    }
+  }
+  res.json(await getSettings());
+}));
 
 /* ---- users (admin manages; staff can list drivers) ---- */
 app.get("/api/users", auth, wrap(async (req, res) => {
@@ -378,7 +466,10 @@ app.get("/api/orders", auth, wrap(async (req, res) => {
   if (req.user.role === "driver") { extra = ` AND (o.driver_id=$2 OR (o.status='ready' AND o.driver_id IS NULL))`; params.push(req.user.id); }
   const { rows } = await q(
     `SELECT ${ORDER_COLS} FROM orders o LEFT JOIN users d ON d.id=o.driver_id WHERE o.day=$1${extra} ORDER BY o.no`, params);
-  res.json({ day, now: new Date().toISOString(), orders: rows });
+  let drivers_live = [];
+  if (req.user.role !== "driver") drivers_live = (await q(`SELECT id, last_lat AS lat, last_lng AS lng, last_at AS at FROM users
+    WHERE role='driver' AND active AND last_at > now() - interval '12 hours'`)).rows;
+  res.json({ day, now: new Date().toISOString(), orders: rows, drivers_live });
 }));
 
 app.post("/api/orders", auth, allow("admin", "staff"), wrap(async (req, res) => {
@@ -417,6 +508,10 @@ app.post("/api/orders", auth, allow("admin", "staff"), wrap(async (req, res) => 
     }
   }
   if (addressId) await q(`UPDATE client_addresses SET last_used_at=now() WHERE id=$1`, [addressId]);
+  const cl = (await q(`SELECT area, delivery_fee FROM clients WHERE id=$1`, [clientId])).rows[0] || {};
+  const addrArea = addressId ? ((await q(`SELECT area FROM client_addresses WHERE id=$1`, [addressId])).rows[0] || {}).area : "";
+  const area = String(b.area || addrArea || (picked || !cl.area ? "" : cl.area) || "").slice(0, 60);
+  const fee = Math.max(0, Math.min(1000, num(b.delivery_fee, num(cl.delivery_fee, 0))));
   await q(`UPDATE clients SET name = CASE WHEN name='' THEN $2 ELSE name END, orders_count = orders_count + 1, updated_at=now() WHERE id=$1`, [clientId, name]);
 
   const day = todayCairo();
@@ -426,13 +521,13 @@ app.post("/api/orders", auth, allow("admin", "staff"), wrap(async (req, res) => 
     const c = await conn.query(
       `INSERT INTO day_counter(day,n) VALUES ($1,1) ON CONFLICT(day) DO UPDATE SET n=day_counter.n+1 RETURNING n`, [day]);
     const { rows } = await conn.query(
-      `INSERT INTO orders(day,no,customer,phone,address,items,amount,source,payment,promise_min,created_by,lat,lng,location_url,loc_at,loc_source,client_id,address_id)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18) RETURNING id`,
+      `INSERT INTO orders(day,no,customer,phone,address,items,amount,source,payment,promise_min,created_by,lat,lng,location_url,loc_at,loc_source,client_id,address_id,delivery_fee,area)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20) RETURNING id`,
       [day, c.rows[0].n, name, normPhone(b.phone) || String(b.phone || "").trim(), addressText,
        String(b.items || "").trim(), Number(b.amount) || 0, String(b.source || ""), payment,
        Math.min(240, Math.max(10, Number(b.promise_min) || 60)), req.user.id,
        loc ? loc.lat : null, loc ? loc.lng : null, loc ? loc.location_url : null, loc ? new Date() : null, locSource,
-       clientId, addressId]);
+       clientId, addressId, fee, area]);
     await conn.query("COMMIT");
     const o = await q(`SELECT ${ORDER_COLS} FROM orders o LEFT JOIN users d ON d.id=o.driver_id WHERE o.id=$1`, [rows[0].id]);
     res.json(o.rows[0]);
@@ -481,7 +576,7 @@ app.patch("/api/orders/:id", auth, wrap(async (req, res) => {
       if (isDriver && o.driver_id !== req.user.id) return res.status(403).json({ error: "الأوردر ده مش معاك" });
       {
         const method = METHODS.includes(collected_method) ? collected_method : (METHODS.includes(o.payment) ? o.payment : "نقدي");
-        let amount = collected_amount === undefined || collected_amount === "" ? Number(o.amount) : Number(collected_amount);
+        let amount = collected_amount === undefined || collected_amount === "" ? Number(o.amount) + Number(o.delivery_fee || 0) : Number(collected_amount);
         if (method === "مدفوع مسبقًا") amount = 0;
         if (!isFinite(amount) || amount < 0 || amount > 1000000) return res.status(400).json({ error: "المبلغ مش مظبوط" });
         sql = `UPDATE orders SET status='done', delivered_at=now(), collected_method=$2, collected_amount=$3, updated_at=now() WHERE id=$1`;
@@ -505,25 +600,39 @@ app.patch("/api/orders/:id", auth, wrap(async (req, res) => {
 /* ---- clients (customers) ---- */
 const staffOnly = allow("admin", "staff");
 app.get("/api/clients", auth, staffOnly, wrap(async (req, res) => {
-  const term = String(req.query.q || "").trim();
+  const term = String(req.query.q || "").trim().slice(0, 60);
   const digits = normPhone(term);
   const params = []; let where = "";
   if (term) {
-    params.push("%" + term + "%");
-    where = `WHERE c.name ILIKE $1 OR EXISTS (SELECT 1 FROM client_addresses a WHERE a.client_id=c.id AND a.address ILIKE $1)`;
-    if (digits.length >= 3) { params.push("%" + digits.replace(/^0/, "") + "%"); where += ` OR EXISTS (SELECT 1 FROM client_phones p WHERE p.client_id=c.id AND p.phone LIKE $2)`; }
+    params.push("%" + term + "%", term);
+    const conds = [`c.name ILIKE $1`, `c.area ILIKE $1`, `c.code = $2`,
+      `EXISTS (SELECT 1 FROM client_addresses a WHERE a.client_id=c.id AND a.address ILIKE $1)`];
+    if (/^\d[\d\s-]{2,}$/.test(term) && digits.length >= 3) {
+      params.push("%" + digits.replace(/^0/, "") + "%");
+      conds.push(`EXISTS (SELECT 1 FROM client_phones p WHERE p.client_id=c.id AND p.phone LIKE $3)`);
+    }
+    where = "WHERE " + conds.join(" OR ");
   }
-  const { rows } = await q(`SELECT c.id, c.name, c.orders_count,
+  const rank = term ? `(c.code = $2) DESC, (c.name ILIKE $2 || '%') DESC,` : "";
+  const { rows } = await q(`WITH hit AS (
+      SELECT c.id FROM clients c ${where}
+      ORDER BY ${rank} c.last_purchase DESC NULLS LAST, c.updated_at DESC LIMIT 40)
+    SELECT c.id, c.name, c.code, c.area, c.status, c.last_purchase, c.invoices, c.orders_count, c.delivery_fee::float AS delivery_fee,
       (SELECT array_agg(phone ORDER BY phone) FROM client_phones p WHERE p.client_id=c.id) AS phones,
       (SELECT count(*)::int FROM client_addresses a WHERE a.client_id=c.id) AS n_addresses,
       (SELECT count(*)::int FROM client_addresses a WHERE a.client_id=c.id AND (a.lat IS NOT NULL OR a.location_url IS NOT NULL)) AS n_located
-    FROM clients c ${where} ORDER BY c.updated_at DESC LIMIT 40`, params);
+    FROM (SELECT id, row_number() OVER () AS rn FROM hit) h JOIN clients c USING (id) ORDER BY h.rn`, params);
   const total = (await q(`SELECT count(*)::int AS n FROM clients`)).rows[0].n;
   res.json({ total, clients: rows });
 }));
 app.get("/api/clients/by-phone/:phone", auth, staffOnly, wrap(async (req, res) => {
   const id = await clientIdByPhone(req.params.phone);
-  res.json(id ? await clientById(id) : null);
+  if (!id) return res.json(null);
+  const c = await clientById(id);
+  // other customers registered on the same number
+  c.shared = (await q(`SELECT c.id, c.name, c.code, c.area FROM client_phones p JOIN clients c ON c.id=p.client_id
+    WHERE p.phone=$1 AND c.id<>$2 ORDER BY c.last_purchase DESC NULLS LAST LIMIT 10`, [normPhone(req.params.phone), id])).rows;
+  res.json(c);
 }));
 app.get("/api/clients/:id", auth, staffOnly, wrap(async (req, res) => {
   const c = await clientById(Number(req.params.id));
@@ -534,7 +643,6 @@ app.post("/api/clients", auth, staffOnly, wrap(async (req, res) => {
   const b = req.body || {};
   const phones = splitPhones(b.phone);
   if (!String(b.name || "").trim() && !phones.length) return res.status(400).json({ error: "اكتب الاسم أو الرقم" });
-  for (const p of phones) if (await clientIdByPhone(p)) return res.status(400).json({ error: `الرقم ${p} متسجل لعميل تاني` });
   const id = (await q(`INSERT INTO clients(name) VALUES ($1) RETURNING id`, [String(b.name || "").trim()])).rows[0].id;
   for (const p of phones) await addPhone(id, p);
   res.json(await clientById(id));
@@ -543,6 +651,8 @@ app.patch("/api/clients/:id", auth, staffOnly, wrap(async (req, res) => {
   const id = Number(req.params.id); const b = req.body || {};
   if (b.name !== undefined) await q(`UPDATE clients SET name=$2, updated_at=now() WHERE id=$1`, [id, String(b.name).trim()]);
   if (b.notes !== undefined) await q(`UPDATE clients SET notes=$2, updated_at=now() WHERE id=$1`, [id, String(b.notes).slice(0, 500)]);
+  if (b.area !== undefined) await q(`UPDATE clients SET area=$2 WHERE id=$1`, [id, String(b.area).trim().slice(0, 60)]);
+  if (b.delivery_fee !== undefined) await q(`UPDATE clients SET delivery_fee=$2 WHERE id=$1`, [id, num(b.delivery_fee)]);
   res.json(await clientById(id));
 }));
 app.delete("/api/clients/:id", auth, allow("admin"), wrap(async (req, res) => {
@@ -554,8 +664,6 @@ app.post("/api/clients/:id/phones", auth, staffOnly, wrap(async (req, res) => {
   const phones = splitPhones(req.body && req.body.phone);
   if (!phones.length) return res.status(400).json({ error: "الرقم مش مظبوط" });
   for (const p of phones) {
-    const other = await clientIdByPhone(p);
-    if (other && other !== id) return res.status(400).json({ error: `الرقم ${p} متسجل لعميل تاني` });
     await addPhone(id, p);
   }
   res.json(await clientById(id));
@@ -592,37 +700,133 @@ app.delete("/api/addresses/:id", auth, staffOnly, wrap(async (req, res) => {
   res.json(a ? await clientById(a.client_id) : { ok: true });
 }));
 
-// Bulk import from the customer sheet. Rows with a shared phone merge into one customer.
+// Bulk import from the customer sheet (works for the Genius export and simple lists).
+// A row matches an existing customer by code first, then by any of its phones. Re-importing updates, never duplicates.
 app.post("/api/clients/import", auth, allow("admin"), wrap(async (req, res) => {
-  const rows = Array.isArray(req.body && req.body.rows) ? req.body.rows.slice(0, 5000) : [];
+  const input = Array.isArray(req.body && req.body.rows) ? req.body.rows.slice(0, 2000) : [];
   const st = { created: 0, merged: 0, phones: 0, addresses: 0, skipped: 0 };
+  // 1) clean rows
+  const rows = [];
+  for (const r of input) {
+    const code = String(r.code ?? "").trim().replace(/\.0+$/, "").slice(0, 40) || null;
+    const phones = [...new Set((r.phones || []).flatMap(splitPhones))].slice(0, 10);
+    const name = String(r.name || "").trim().slice(0, 120);
+    if (!code && !phones.length) { st.skipped++; continue; }
+    const area = String(r.area || "").trim().slice(0, 60);
+    const addresses = (r.addresses || []).flatMap(a => String(a.address || "").split("|").map((t, j) => ({
+        address: t.trim().slice(0, 300), label: j ? "" : String(a.label || "").trim().slice(0, 40), location: j ? "" : String(a.location || "").trim() })))
+      .filter(a => a.address || a.location).slice(0, 10);
+    rows.push({ code, phones, name, area, addresses,
+      fee: num(r.delivery_fee), branch: String(r.branch || "").trim().slice(0, 40), invoices: Math.round(num(r.invoices, 0)),
+      first: toDate(r.first_purchase), last: toDate(r.last_purchase), spend: num(r.spend_12m, 0), status: String(r.status || "").trim().slice(0, 40),
+      notes: String(r.notes || "").trim().slice(0, 500) });
+  }
+  if (!rows.length) return res.json(st);
+
   const conn = await pool.connect();
   try {
     await conn.query("BEGIN");
     const cq = (t, p) => conn.query(t, p);
+    // 2) who already exists
+    const codes = rows.map(r => r.code).filter(Boolean), allPhones = rows.flatMap(r => r.phones);
+    const byCode = new Map((await cq(`SELECT id, code FROM clients WHERE code = ANY($1)`, [codes])).rows.map(r => [r.code, r.id]));
+    const phoneRows = (await cq(`SELECT p.phone, p.client_id, c.code FROM client_phones p JOIN clients c ON c.id=p.client_id WHERE p.phone = ANY($1)`, [allPhones])).rows;
+    const byPhoneAny = new Map(), byPhoneNoCode = new Map();
+    phoneRows.forEach(r => { if (!byPhoneAny.has(r.phone)) byPhoneAny.set(r.phone, r.client_id); if (!r.code && !byPhoneNoCode.has(r.phone)) byPhoneNoCode.set(r.phone, r.client_id); });
+    // 3) group rows. A row with a code is its own customer (different codes = different people, even on a shared number);
+    //    it can absorb a code-less customer that was created from orders with the same phone. Rows without a code group by phone.
+    const groups = []; const gByKey = new Map(); const claimed = new Set();
+    const groupFor = id => { let g = id && groups.find(x => x.id === id); if (!g) { g = { id, rows: [] }; groups.push(g); } return g; };
     for (const r of rows) {
-      const name = String(r.name || "").trim().slice(0, 120);
-      const phones = [...new Set((r.phones || []).flatMap(splitPhones))];
-      const addrs = (r.addresses || []).map(a => ({ address: String(a.address || "").trim().slice(0, 300), label: String(a.label || "").trim().slice(0, 40), location: String(a.location || "").trim() }))
-        .filter(a => a.address || a.location);
-      if (!phones.length && !name) { st.skipped++; continue; }
-      if (!phones.length) { st.skipped++; continue; } // a phone is the key to find the customer later
-      let id = null;
-      const hit = (await cq(`SELECT client_id FROM client_phones WHERE phone = ANY($1) LIMIT 1`, [phones])).rows[0];
-      if (hit) { id = hit.client_id; st.merged++; if (name) await cq(`UPDATE clients SET name=$2 WHERE id=$1 AND name=''`, [id, name]); }
-      else { id = (await cq(`INSERT INTO clients(name) VALUES ($1) RETURNING id`, [name])).rows[0].id; st.created++; }
-      for (const p of phones) { const x = await cq(`INSERT INTO client_phones(phone, client_id) VALUES ($1,$2) ON CONFLICT DO NOTHING`, [p, id]); st.phones += x.rowCount; }
-      const existing = (await cq(`SELECT address, location_url, lat FROM client_addresses WHERE client_id=$1`, [id])).rows;
-      for (const a of addrs) {
-        const c = coordsFromText(a.location);
-        const url = (a.location.match(/https?:\/\/\S+/) || [null])[0];
-        const dup = existing.find(e => (a.address && normAddr(e.address) === normAddr(a.address)) || (url && e.location_url === url));
-        if (dup) continue;
-        await cq(`INSERT INTO client_addresses(client_id, label, address, lat, lng, location_url) VALUES ($1,$2,$3,$4,$5,$6)`,
-          [id, a.label, a.address, c ? c.lat : null, c ? c.lng : null, url]);
-        existing.push({ address: a.address, location_url: url }); st.addresses++;
+      let g;
+      if (r.code) {
+        g = gByKey.get("c:" + r.code);
+        if (!g) {
+          let id = byCode.get(r.code) || null;
+          if (!id) { id = r.phones.map(p => byPhoneNoCode.get(p)).find(x => x && !claimed.has(x)) || null; if (id) claimed.add(id); }
+          g = groupFor(id); gByKey.set("c:" + r.code, g);
+        }
+      } else {
+        g = r.phones.map(p => gByKey.get("p:" + p)).find(Boolean);
+        if (!g) g = groupFor(r.phones.map(p => byPhoneAny.get(p)).find(Boolean) || null);
+        r.phones.forEach(p => gByKey.set("p:" + p, g));
       }
+      g.rows.push(r);
     }
+    // 4) create the new customers (ids reserved first so they map back exactly)
+    const fresh = groups.filter(g => !g.id);
+    if (fresh.length) {
+      const ids = (await cq(`SELECT nextval(pg_get_serial_sequence('clients','id'))::int AS id FROM generate_series(1,$1)`, [fresh.length])).rows.map(r => r.id);
+      fresh.forEach((g, i) => (g.id = ids[i]));
+    }
+    st.created = fresh.length; st.merged = rows.length - fresh.length;
+    const head = g => { // first non-empty value wins for each field
+      const pick = f => { for (const r of g.rows) if (r[f] !== null && r[f] !== "" && r[f] !== undefined) return r[f]; return null; };
+      return { name: pick("name") || "", code: pick("code"), area: pick("area") || "", fee: pick("fee"), branch: pick("branch") || "",
+        invoices: Math.max(0, ...g.rows.map(r => r.invoices || 0)), first: pick("first"), last: pick("last"),
+        spend: Math.max(0, ...g.rows.map(r => r.spend || 0)), status: pick("status") || "", notes: g.rows.map(r => r.notes).filter(Boolean).join(" - ") };
+    };
+    const H = groups.map(head);
+    const col = f => H.map(h => h[f]);
+    // codes already used by another customer stay where they are
+    const takenCodes = new Map((await cq(`SELECT code, id FROM clients WHERE code = ANY($1)`, [H.map(h => h.code).filter(Boolean)])).rows.map(r => [r.code, r.id]));
+    const codeFor = H.map((h, i) => (h.code && (!takenCodes.has(h.code) || takenCodes.get(h.code) === groups[i].id) ? h.code : null));
+    if (fresh.length) {
+      const idx = groups.map((g, i) => i).filter(i => fresh.includes(groups[i]));
+      const sel = arr => idx.map(i => arr[i]);
+      await cq(`INSERT INTO clients(id, name, code, area, delivery_fee, branch, invoices, first_purchase, last_purchase, spend_12m, status, notes)
+        SELECT * FROM unnest($1::int[], $2::text[], $3::text[], $4::text[], $5::numeric[], $6::text[], $7::int[], $8::timestamptz[], $9::timestamptz[], $10::numeric[], $11::text[], $12::text[])`,
+        [sel(groups.map(g => g.id)), sel(col("name")), sel(codeFor), sel(col("area")), sel(col("fee")), sel(col("branch")), sel(col("invoices")),
+         sel(col("first")), sel(col("last")), sel(col("spend")), sel(col("status")), sel(col("notes"))]);
+    }
+    const old = groups.map((g, i) => i).filter(i => !fresh.includes(groups[i]));
+    if (old.length) {
+      const sel = arr => old.map(i => arr[i]);
+      await cq(`UPDATE clients c SET
+          name = CASE WHEN c.name = '' THEN v.name ELSE c.name END,
+          code = COALESCE(c.code, v.code),
+          area = COALESCE(NULLIF(v.area, ''), c.area),
+          delivery_fee = COALESCE(v.fee, c.delivery_fee),
+          branch = COALESCE(NULLIF(v.branch, ''), c.branch),
+          invoices = GREATEST(c.invoices, v.invoices),
+          first_purchase = COALESCE(v.first, c.first_purchase),
+          last_purchase = GREATEST(c.last_purchase, v.last),
+          spend_12m = v.spend,
+          status = COALESCE(NULLIF(v.status, ''), c.status),
+          notes = CASE WHEN c.notes = '' THEN v.notes ELSE c.notes END,
+          updated_at = now()
+        FROM unnest($1::int[], $2::text[], $3::text[], $4::text[], $5::numeric[], $6::text[], $7::int[], $8::timestamptz[], $9::timestamptz[], $10::numeric[], $11::text[], $12::text[])
+          AS v(id, name, code, area, fee, branch, invoices, first, last, spend, status, notes)
+        WHERE c.id = v.id`,
+        [sel(groups.map(g => g.id)), sel(col("name")), sel(codeFor), sel(col("area")), sel(col("fee")), sel(col("branch")), sel(col("invoices")),
+         sel(col("first")), sel(col("last")), sel(col("spend")), sel(col("status")), sel(col("notes"))]);
+    }
+    // 5) phones
+    const pPhone = [], pId = [];
+    groups.forEach(g => [...new Set(g.rows.flatMap(r => r.phones))].forEach(p => { pPhone.push(p); pId.push(g.id); }));
+    if (pPhone.length) st.phones = (await cq(`INSERT INTO client_phones(phone, client_id) SELECT * FROM unnest($1::text[], $2::int[]) ON CONFLICT DO NOTHING`, [pPhone, pId])).rowCount;
+    // 6) addresses (skip ones the customer already has); the first address of a row is its main one
+    const gIds = groups.map(g => g.id);
+    const have = new Map();
+    (await cq(`SELECT client_id, address, location_url FROM client_addresses WHERE client_id = ANY($1)`, [gIds])).rows
+      .forEach(a => { const k = a.client_id; if (!have.has(k)) have.set(k, []); have.get(k).push(a); });
+    const A = { cid: [], label: [], address: [], area: [], lat: [], lng: [], url: [], used: [] };
+    groups.forEach((g, gi) => {
+      const list = have.get(g.id) || []; let n = 0;
+      const base = Date.parse(H[gi].last || "2000-01-01T00:00:00Z");
+      g.rows.forEach(r => r.addresses.forEach((a, j) => {
+        const c = coordsFromText(a.location); const url = (a.location.match(/https?:\/\/\S+/) || [null])[0];
+        if (list.some(e => (a.address && normAddr(e.address) === normAddr(a.address)) || (url && e.location_url === url))) return;
+        list.push({ address: a.address, location_url: url });
+        A.cid.push(g.id); A.label.push(a.label); A.address.push(a.address); A.area.push(j === 0 ? r.area : "");
+        A.lat.push(c ? c.lat : null); A.lng.push(c ? c.lng : null); A.url.push(url);
+        A.used.push(new Date(base - (n++) * 1000).toISOString());
+      }));
+      have.set(g.id, list);
+    });
+    if (A.cid.length) st.addresses = (await cq(`INSERT INTO client_addresses(client_id, label, address, area, lat, lng, location_url, last_used_at)
+      SELECT * FROM unnest($1::int[], $2::text[], $3::text[], $4::text[], $5::float8[], $6::float8[], $7::text[], $8::timestamptz[])`,
+      [A.cid, A.label, A.address, A.area, A.lat, A.lng, A.url, A.used])).rowCount;
     await conn.query("COMMIT");
   } catch (e) { await conn.query("ROLLBACK"); throw e; }
   finally { conn.release(); }
@@ -688,6 +892,64 @@ app.post("/api/public/loc/:token", publicLimit, wrap(async (req, res) => {
 }));
 app.get("/l/:token", (req, res) => res.sendFile(path.join(__dirname, "public", "locate.html")));
 
+/* ---- live driver location ---- */
+const lastStored = new Map(); let lastPurge = 0;
+app.post("/api/driver/location", auth, allow("driver"), wrap(async (req, res) => {
+  const b = req.body || {};
+  const lat = num(b.lat), lng = num(b.lng);
+  if (lat === null || lng === null || Math.abs(lat) > 90 || Math.abs(lng) > 180) return res.status(400).json({ error: "الموقع مش واضح" });
+  const acc = num(b.acc), speed = num(b.speed), battery = num(b.battery);
+  await q(`UPDATE users SET last_lat=$2, last_lng=$3, last_acc=$4, last_speed=$5, last_battery=$6, last_at=now() WHERE id=$1`,
+    [req.user.id, lat, lng, acc, speed, battery]);
+  // keep a trail point every ~15 s or 25 m, skipping very inaccurate fixes
+  const prev = lastStored.get(req.user.id);
+  if ((acc === null || acc < 150) && (!prev || Date.now() - prev.t > 15000 || km(prev.lat, prev.lng, lat, lng) > 0.025)) {
+    await q(`INSERT INTO driver_positions(driver_id, lat, lng, acc) VALUES ($1,$2,$3,$4)`, [req.user.id, lat, lng, acc]);
+    lastStored.set(req.user.id, { lat, lng, t: Date.now() });
+  }
+  if (Date.now() - lastPurge > 3600 * 1000) { lastPurge = Date.now(); q(`DELETE FROM driver_positions WHERE at < now() - interval '14 days'`).catch(() => {}); }
+  res.json({ ok: true });
+}));
+app.get("/api/live", auth, staffOnly, wrap(async (req, res) => {
+  const drivers = (await q(`SELECT id, name, phone, last_lat AS lat, last_lng AS lng, last_acc AS acc, last_speed AS speed, last_battery AS battery, last_at AS at
+    FROM users WHERE role='driver' AND active ORDER BY name`)).rows;
+  const orders = (await q(`SELECT id, no, customer, address, area, lat, lng, status, driver_id, created_at, out_at, promise_min
+    FROM orders WHERE day=$1 AND status IN ('new','ready','out') ORDER BY no`, [todayCairo()])).rows;
+  const trail = (await q(`SELECT driver_id, lat, lng, at FROM driver_positions WHERE at > now() - interval '3 hours' ORDER BY driver_id, at`)).rows;
+  const trails = {};
+  for (const p of trail) (trails[p.driver_id] = trails[p.driver_id] || []).push([p.lat, p.lng]);
+  for (const k of Object.keys(trails)) { const t = trails[k]; if (t.length > 300) { const step = Math.ceil(t.length / 300); trails[k] = t.filter((_, i) => i % step === 0 || i === t.length - 1); } }
+  const st = await getSettings();
+  res.json({ now: new Date().toISOString(), drivers, orders, trails, pharmacy: st.lat != null ? { name: st.name, lat: st.lat, lng: st.lng } : null });
+}));
+
+// Tracking link the customer opens from the "your order is out" message
+app.post("/api/orders/:id/track-link", auth, staffOnly, wrap(async (req, res) => {
+  const id = Number(req.params.id);
+  const cur = (await q(`SELECT track_token FROM orders WHERE id=$1`, [id])).rows[0];
+  if (!cur) return res.status(404).json({ error: "الأوردر مش موجود" });
+  let token = cur.track_token;
+  if (!token) { token = crypto.randomBytes(9).toString("base64url"); await q(`UPDATE orders SET track_token=$2 WHERE id=$1`, [id, token]); }
+  const base = PUBLIC_URL || `${req.protocol}://${req.get("host")}`;
+  res.json({ url: `${base}/t/${token}` });
+}));
+app.get("/api/public/track/:token", publicLimit, wrap(async (req, res) => {
+  const o = (await q(`SELECT o.no, o.customer, o.status, o.lat, o.lng, o.created_at, o.out_at, o.delivered_at, o.driver_id,
+      u.name AS driver_name, u.last_lat, u.last_lng, u.last_at
+    FROM orders o LEFT JOIN users u ON u.id=o.driver_id WHERE o.track_token=$1`, [String(req.params.token || "")])).rows[0];
+  if (!o || Date.now() - new Date(o.created_at).getTime() > 24 * 3600 * 1000) return res.status(404).json({ error: "اللينك ده انتهى" });
+  const st = await getSettings();
+  const out = { pharmacy: st.name, shop: st.lat != null ? { lat: st.lat, lng: st.lng } : null, no: o.no, name: String(o.customer).split(" ")[0], status: o.status, out_at: o.out_at, delivered_at: o.delivered_at,
+    dest: o.lat != null ? { lat: o.lat, lng: o.lng } : null, driver: null, now: new Date().toISOString() };
+  // the driver's position is shared only while this order is on its way
+  if (o.status === "out" && o.last_lat != null && o.last_at && Date.now() - new Date(o.last_at).getTime() < 15 * 60000) {
+    out.driver = { name: String(o.driver_name || "").split(" ")[0], lat: o.last_lat, lng: o.last_lng, at: o.last_at };
+    if (out.dest) out.km = Math.round(km(o.last_lat, o.last_lng, o.lat, o.lng) * 1.3 * 10) / 10;
+  }
+  res.json(out);
+}));
+app.get("/t/:token", (req, res) => res.sendFile(path.join(__dirname, "public", "track.html")));
+
 /* ---- collections: cash each driver is holding ---- */
 app.get("/api/custody", auth, wrap(async (req, res) => {
   const params = []; let where = "";
@@ -742,6 +1004,8 @@ app.get("/api/report", auth, allow("admin", "staff"), wrap(async (req, res) => {
 }));
 
 /* ---- static app ---- */
+app.use("/vendor/xlsx", express.static(path.join(__dirname, "node_modules", "xlsx", "dist"), { maxAge: "30d" }));
+app.use("/vendor/leaflet", express.static(path.join(__dirname, "node_modules", "leaflet", "dist"), { maxAge: "30d" }));
 app.use(express.static(path.join(__dirname, "public"), {
   setHeaders(res, p) { if (p.endsWith("sw.js") || p.endsWith(".html")) res.set("Cache-Control", "no-cache"); },
 }));

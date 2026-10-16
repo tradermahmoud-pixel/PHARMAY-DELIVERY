@@ -15,12 +15,12 @@
   const REASONS = ["تأخير", "العميل لغى", "صنف ناقص", "عنوان غلط / مش بيرد", "سبب تاني"];
   const FILTERS = [["active", "الشغال"], ["late", "المتأخر"], ["new", "جديد"], ["ready", "جاهز"], ["out", "مع الطيار"], ["done", "اتسلم"], ["cancel", "اتلغى"], ["all", "الكل"]];
   const TABS = {
-    admin: [["orders", "الأوردرات"], ["clients", "العملاء"], ["report", "التقارير"], ["users", "المستخدمين"]],
-    staff: [["orders", "الأوردرات"], ["clients", "العملاء"], ["report", "التقارير"]],
+    admin: [["orders", "الأوردرات"], ["map", "الخريطة"], ["clients", "العملاء"], ["report", "التقارير"], ["users", "الفريق"]],
+    staff: [["orders", "الأوردرات"], ["map", "الخريطة"], ["clients", "العملاء"], ["report", "التقارير"]],
     driver: [["driver", "أوردراتي"]],
   };
 
-  const S = { token: null, user: null, today: null, orders: [], drivers: [], users: [], tab: null, filter: "active", skew: 0, pollT: null, lastMine: null };
+  const S = { live: [], token: null, user: null, today: null, orders: [], drivers: [], users: [], tab: null, filter: "active", skew: 0, pollT: null, lastMine: null };
   const $ = id => document.getElementById(id);
   const esc = s => String(s == null ? "" : s).replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
   const now = () => Date.now() + S.skew;
@@ -43,6 +43,38 @@
     if (!res.ok) throw new Error(data.error || "حصلت مشكلة، جرّب تاني");
     return data;
   }
+
+  /* ---------- pharmacy name & location ---------- */
+  S.shop = { name: "توصيل الصيدلية", lat: null, lng: null };
+  function applyShop() {
+    document.querySelectorAll(".js-shop").forEach(el => (el.textContent = S.shop.name));
+    document.title = S.shop.name;
+  }
+  async function loadShop() { try { S.shop = await api("/api/public/settings"); applyShop(); } catch (e) {} }
+  function renderShopForm() {
+    $("s-name").value = S.shop.name;
+    $("s-loc").value = "";
+    $("s-loc").placeholder = S.shop.lat != null ? `محفوظ: ${S.shop.lat.toFixed(5)}, ${S.shop.lng.toFixed(5)} · الصق لينك جديد للتغيير` : "الصق لينك جوجل ماب للصيدلية";
+    $("s-status").textContent = S.shop.lat != null ? "موقع الصيدلية محفوظ وبيظهر على الخريطة." : "موقع الصيدلية لسه مش متحدد.";
+  }
+  async function saveShop(body, msg) {
+    try { S.shop = await api("/api/settings", { method: "PUT", body }); applyShop(); renderShopForm(); toast(msg); if (MAP) refreshMap(); }
+    catch (err) { toast(err.message); }
+  }
+  $("shopForm").addEventListener("submit", e => {
+    e.preventDefault();
+    const body = { name: $("s-name").value };
+    if ($("s-loc").value.trim()) body.location = $("s-loc").value;
+    saveShop(body, "بيانات الصيدلية اتحفظت");
+  });
+  $("s-here").addEventListener("click", () => {
+    if (!navigator.geolocation) { toast("الجهاز ده مش بيدعم تحديد الموقع"); return; }
+    $("s-status").textContent = "بيحدد موقعك…";
+    navigator.geolocation.getCurrentPosition(
+      p => saveShop({ lat: p.coords.latitude, lng: p.coords.longitude }, "موقع الصيدلية اتحفظ"),
+      () => { $("s-status").textContent = "مش قادر يحدد موقعك. اسمح للمتصفح بالموقع، أو الصق لينك جوجل ماب."; },
+      { enableHighAccuracy: true, timeout: 20000 });
+  });
 
   /* ---------- login ---------- */
   async function showLogin(msg) {
@@ -91,16 +123,19 @@
     clearInterval(S.pollT);
     S.pollT = setInterval(() => { if (!document.hidden) refresh(); }, 10000);
   }
-  document.addEventListener("visibilitychange", () => { if (!document.hidden && S.user) refresh(); });
+  document.addEventListener("visibilitychange", () => {
+    if (!document.hidden && S.user) { refresh(); if (TR.watch !== null) keepAwake(); if (S.tab === "map") refreshMap(); }
+  });
 
   function setTab(t) {
     S.tab = t;
     document.querySelectorAll("[data-tab]").forEach(b => b.setAttribute("aria-selected", b.dataset.tab === t));
-    ["orders", "driver", "report", "users", "clients"].forEach(k => ($("tab-" + k).hidden = k !== t));
-    $("summary").hidden = t === "report" || t === "users" || t === "clients";
+    ["orders", "driver", "report", "users", "clients", "map"].forEach(k => ($("tab-" + k).hidden = k !== t));
+    $("summary").hidden = t === "report" || t === "users" || t === "clients" || t === "map";
+    if (t === "map") openMap().catch(err => ($("mapStatus").textContent = err.message));
     if (t === "report") loadReport();
     if (t === "clients") { $("importPanel").hidden = S.user.role !== "admin"; loadClients(); }
-    if (t === "users") loadUsers();
+    if (t === "users") { loadUsers(); renderShopForm(); }
     render();
   }
 
@@ -110,7 +145,7 @@
       S.skew = Date.parse(r.now) - Date.now();
       const hadLoc = new Set(S.orders.filter(o => o.lat != null).map(o => o.id));
       const firstLoad = !S.orders.length;
-      S.orders = r.orders; S.today = r.day;
+      S.orders = r.orders; S.today = r.day; S.live = r.drivers_live || [];
       if (!firstLoad && S.user.role !== "driver") {
         const arrived = S.orders.find(o => o.lat != null && o.loc_source === "customer" && !hadLoc.has(o.id));
         if (arrived) toast(`لوكيشن أوردر #${arrived.no} وصل من العميل`);
@@ -118,6 +153,7 @@
       if (S.user.role !== "driver") S.drivers = (await api("/api/users")).filter(u => u.role === "driver" && u.active);
       $("sync").textContent = "آخر تحديث " + clock(new Date());
       notifyDriver();
+      syncTracking();
       render();
     } catch (e) { $("sync").textContent = "مفيش اتصال — بيحاول تاني"; }
   }
@@ -144,6 +180,74 @@
     const d = String(phone || "").replace(/\D/g, ""); const intl = d.startsWith("0") ? "2" + d : d;
     return `https://wa.me/${intl}?text=${encodeURIComponent(text)}`;
   };
+
+  function distKm(aLat, aLng, bLat, bLng) {
+    const r = x => x * Math.PI / 180;
+    const d = Math.sin(r(bLat - aLat) / 2) ** 2 + Math.cos(r(aLat)) * Math.cos(r(bLat)) * Math.sin(r(bLng - aLng) / 2) ** 2;
+    return 12742 * Math.asin(Math.sqrt(d));
+  }
+  const fmtKm = k => (k < 1 ? Math.round(k * 1000 / 50) * 50 + " م" : (Math.round(k * 10) / 10) + " كم");
+  const ago = v => { const s = Math.max(0, Math.round((now() - ts(v)) / 1000)); return s < 60 ? `${s} ث` : s < 3600 ? `${Math.round(s / 60)} د` : `${Math.round(s / 3600)} س`; };
+
+  /* ---------- driver: share location while delivering ---------- */
+  const TR = { watch: null, hb: null, last: null, sentAt: 0, okAt: 0, sentPos: null, lock: null, err: "" };
+  const myOut = () => S.orders.filter(o => o.driver_id === S.user.id && o.status === "out").length;
+  function syncTracking() {
+    if (!S.user || S.user.role !== "driver") return;
+    if (myOut() > 0) startTracking(); else stopTracking();
+    renderTrackBar();
+  }
+  function startTracking() {
+    if (TR.watch !== null) return;
+    if (!navigator.geolocation) { TR.err = "الموبايل ده مش بيدعم تحديد الموقع"; return; }
+    TR.watch = navigator.geolocation.watchPosition(onPos, onPosErr, { enableHighAccuracy: true, maximumAge: 10000, timeout: 30000 });
+    TR.hb = setInterval(() => { if (TR.last && Date.now() - TR.sentAt > 45000) sendPos(TR.last); }, 15000);
+    keepAwake();
+  }
+  function stopTracking() {
+    if (TR.watch !== null) { try { navigator.geolocation.clearWatch(TR.watch); } catch (e) {} }
+    TR.watch = null; clearInterval(TR.hb); TR.hb = null;
+    try { TR.lock && TR.lock.release(); } catch (e) {} TR.lock = null;
+  }
+  function onPos(p) {
+    TR.err = ""; TR.last = p.coords;
+    const moved = TR.sentPos ? distKm(TR.sentPos.lat, TR.sentPos.lng, p.coords.latitude, p.coords.longitude) * 1000 : Infinity;
+    if (Date.now() - TR.sentAt > 15000 || moved > 40) sendPos(p.coords);
+    renderTrackBar();
+  }
+  function onPosErr(e) {
+    TR.err = e.code === 1 ? "الموبايل رافض مشاركة الموقع. من إعدادات المتصفح اسمح للبرنامج بالموقع، وبعدين افتحه تاني."
+      : "مش لاقي إشارة GPS. اتأكد إن الموقع (Location) شغال في الموبايل.";
+    renderTrackBar();
+  }
+  async function sendPos(c) {
+    TR.sentAt = Date.now(); TR.sentPos = { lat: c.latitude, lng: c.longitude };
+    let battery = null;
+    try { if (navigator.getBattery) battery = Math.round((await navigator.getBattery()).level * 100); } catch (e) {}
+    try {
+      await api("/api/driver/location", { method: "POST", body: { lat: c.latitude, lng: c.longitude, acc: c.accuracy, speed: c.speed, battery } });
+      TR.okAt = Date.now(); TR.err = "";
+    } catch (e) { TR.err = "موقعك مش بيوصل للصيدلية. اتأكد من النت."; }
+    renderTrackBar();
+  }
+  async function keepAwake() {
+    try {
+      if ("wakeLock" in navigator && !TR.lock && document.visibilityState === "visible") {
+        TR.lock = await navigator.wakeLock.request("screen");
+        TR.lock.addEventListener("release", () => { TR.lock = null; renderTrackBar(); });
+      }
+    } catch (e) {}
+    renderTrackBar();
+  }
+  function renderTrackBar() {
+    const bar = $("trackBar"); if (!bar || !S.user || S.user.role !== "driver") return;
+    bar.hidden = false;
+    if (TR.watch === null) { bar.className = "trackbar idle"; bar.innerHTML = `مشاركة موقعك هتشتغل لوحدها أول ما تدوس "استلمته وخرجت".`; return; }
+    if (TR.err) { bar.className = "trackbar bad"; bar.innerHTML = `<b>موقعك مش ظاهر للصيدلية</b><span>${esc(TR.err)}</span>`; return; }
+    bar.className = "trackbar on";
+    bar.innerHTML = `<b><i class="dot"></i>موقعك ظاهر للصيدلية</b><span>${TR.okAt ? "آخر إرسال من " + ago(new Date(TR.okAt).toISOString()) : "بيحدد موقعك…"}${TR.last && TR.last.accuracy ? ` · دقة ${Math.round(TR.last.accuracy)} م` : ""}</span>
+      <span class="hint">خلي البرنامج مفتوح طول التوصيل${TR.lock ? "، والشاشة هتفضل منورة لوحدها" : ""}. لو قفلته أو قفلت الشاشة، الموقع بيقف لحد ما تفتحه تاني.</span>`;
+  }
 
   /* ---------- logic ---------- */
   const isFinal = o => o.status === "done" || o.status === "cancel";
@@ -198,7 +302,7 @@
       : `<div class="tile"><b>${active.length}</b><span>شغال دلوقتي</span></div><div class="tile ${late.length ? "late" : ""}"><b>${late.length}</b><span>متأخر عن الوعد</span></div><div class="tile"><b>${fmtMin(avg)}</b><span>متوسط التوصيل</span></div><div class="tile ${canc ? "late" : ""}"><b>${canc}<small class="hint"> / ${os.length}</small></b><span>اتلغى من الإجمالي</span></div>`;
     if (S.user.role !== "driver") {
       const sd = suggestDriver();
-      $("suggest").textContent = sd ? `الأقرب للخروج: ${sd.name} (معاه ${load(sd.id)})` : (S.user.role === "admin" ? "ضيف الطيارين من تبويب المستخدمين" : "مفيش طيارين متسجلين");
+      $("suggest").textContent = sd ? `الأقرب للخروج: ${sd.name} (معاه ${load(sd.id)})` : (S.user.role === "admin" ? "ضيف الطيارين من تبويب الفريق" : "مفيش طيارين متسجلين");
     }
   }
 
@@ -232,7 +336,7 @@
     }
     const locSrc = { customer: "العميل بعته", staff: "اتسجل", saved: "محفوظ من قبل" }[o.loc_source] || "";
     const locPill = hasLoc ? `<span class="pill okp">لوكيشن ✓ ${locSrc}</span>` : (!isFinal(o) ? `<span class="pill warnp">مفيش لوكيشن</span>` : "");
-    const copy = !driverMode ? `<button class="btn small" data-act="copy" data-id="${o.id}">${o.status === "out" ? "رسالة: خرج" : "نسخ"}</button>` : "";
+    const copy = !driverMode ? `<button class="btn small ${o.status === "out" ? "loc" : ""}" data-act="copy" data-id="${o.id}">${o.status === "out" ? "ابعت لينك التتبع للعميل" : "نسخ"}</button>` : "";
     return `<article class="card st-${o.status} ${lt === "late" && !isFinal(o) ? "is-late" : lt === "warn" && !isFinal(o) ? "is-warn" : ""}">
       <div class="top">
         <div style="min-width:0">
@@ -243,10 +347,14 @@
       </div>
       ${o.items ? `<div class="items">${esc(o.items)}</div>` : ""}
       <div class="meta num">
-        <span>${esc(o.source)}</span>·<span>${Number(o.amount) ? esc(Number(o.amount)) + " ج" : "—"}</span>·<span class="pill pay">${esc(o.collected_method || o.payment)}${o.status === "done" && o.collected_amount != null ? " " + money(o.collected_amount) : ""}</span>·<span>اتسجل ${clock(o.created_at)}</span>
+        ${o.area ? `<span class="pill area">${esc(o.area)}</span>` : ""}
+        <span>${esc(o.source)}</span>·<span>${Number(o.amount) ? money(o.amount) : "—"}${Number(o.delivery_fee) ? ` + توصيل ${money(o.delivery_fee)}` : ""}</span>·<span class="pill pay">${esc(o.collected_method || o.payment)}${o.status === "done" && o.collected_amount != null ? " " + money(o.collected_amount) : ""}</span>·<span>اتسجل ${clock(o.created_at)}</span>
         ${o.driver_name ? `·<span>الطيار: ${esc(o.driver_name)}</span>` : ""}
         ${o.cancel_reason ? `·<span style="color:var(--late)">السبب: ${esc(o.cancel_reason)}</span>` : ""}
         ${locPill}
+        ${(() => { if (driverMode || o.status !== "out" || o.lat == null) return "";
+          const d = S.live.find(x => x.id === o.driver_id); if (!d || d.lat == null) return "";
+          return `<span class="pill drvp">الطيار على بعد ${fmtKm(distKm(d.lat, d.lng, o.lat, o.lng) * 1.3)} · من ${ago(d.at)}</span>`; })()}
       </div>
       <div class="row">${actions}${contact}${maps}${copy}</div>
     </article>`;
@@ -347,11 +455,12 @@
   async function loadClients() {
     try {
       const r = await api("/api/clients?q=" + encodeURIComponent($("c-search").value.trim()));
-      $("c-total").textContent = `${r.total} عميل متسجل` + ($("c-search").value.trim() ? ` · ${r.clients.length} نتيجة` : " · آخر اللي اتعاملوا");
+      $("c-total").textContent = `${r.total.toLocaleString("ar-EG")} عميل متسجل` + ($("c-search").value.trim() ? ` · ${r.clients.length} نتيجة` : " · آخر اللي اتعاملوا");
       $("clientList").innerHTML = r.clients.length ? r.clients.map(c => `<button class="card client-row" data-act="openClient" data-id="${c.id}">
-          <div class="top"><b>${esc(c.name || "بدون اسم")}</b><span class="hint">${c.orders_count} أوردر</span></div>
+          <div class="top"><b>${esc(c.name || "بدون اسم")}</b>${c.code ? `<span class="hint num">كود ${esc(c.code)}</span>` : ""}</div>
           <div class="hint num">${(c.phones || []).map(esc).join(" / ") || "مفيش رقم"}</div>
-          <div class="meta"><span>${c.n_addresses} عنوان</span>${c.n_addresses ? `·<span>${c.n_located} بلوكيشن</span>` : ""}</div></button>`).join("")
+          <div class="meta">${c.area ? `<span class="pill area">${esc(c.area)}</span>` : ""}${c.status ? `<span class="pill ${statusClass(c.status)}">${esc(c.status)}</span>` : ""}
+            <span>${c.n_addresses} عنوان</span>${c.n_addresses ? `·<span>${c.n_located} بلوكيشن</span>` : ""}${c.last_purchase ? `·<span>آخر شراء ${fmtDate(c.last_purchase)}</span>` : ""}</div></button>`).join("")
         : `<div class="empty">${$("c-search").value.trim() ? "مفيش عميل بالبحث ده" : "لسه مفيش عملاء. هيتسجلوا لوحدهم مع الأوردرات، أو استورد الليستة من تحت."}</div>`;
     } catch (e) { toast(e.message); }
   }
@@ -365,8 +474,10 @@
     const isAdmin = S.user.role === "admin";
     sheet(`<div class="row spread"><h2>${esc(c.name || "عميل")}</h2><button class="btn small" data-act="closeSheet">قفل</button></div>
       <div class="sheet-scroll list">
-        <div class="grid2"><label>الاسم<input id="ec-name" value="${esc(c.name)}"></label><label>ملاحظات<input id="ec-notes" value="${esc(c.notes)}" placeholder="مثلاً: بيدفع فيزا دايمًا"></label></div>
-        <button class="btn small" data-act="saveClient">حفظ الاسم والملاحظات</button>
+        ${clientFacts(c)}
+        <div class="grid2"><label>الاسم<input id="ec-name" value="${esc(c.name)}"></label><label>ملاحظات<input id="ec-notes" value="${esc(c.notes)}" placeholder="مثلاً: بيدفع فيزا دايمًا"></label>
+          <label>المنطقة<input id="ec-area" value="${esc(c.area || "")}"></label><label>رسوم التوصيل (جنيه)<input id="ec-fee" type="number" inputmode="decimal" min="0" value="${c.delivery_fee ?? ""}"></label></div>
+        <button class="btn small" data-act="saveClient">حفظ البيانات</button>
         <h3>الأرقام</h3>
         ${c.phones.map(p => `<div class="user"><span class="num">${esc(p)}</span><button class="btn small danger" data-act="delPhone" data-p="${esc(p)}">شيل</button></div>`).join("") || `<p class="hint" style="margin:0">مفيش أرقام</p>`}
         <div class="row"><input id="ec-phone" inputmode="tel" placeholder="رقم تاني" style="flex:1;min-width:0"><button class="btn small" data-act="addPhone">إضافة</button></div>
@@ -393,75 +504,183 @@
   }
 
   /* ---------- import ---------- */
-  const ROLE_LABELS = { skip: "تجاهل", name: "الاسم", phone: "تليفون", address: "عنوان", location: "لوكيشن", label: "اسم العنوان", notes: "ملاحظات" };
+  const ROLE_LABELS = { skip: "تجاهل", code: "كود العميل", name: "الاسم", phone: "تليفون", address: "عنوان", area: "المنطقة", location: "لوكيشن",
+    label: "اسم العنوان", fee: "رسوم التوصيل", branch: "الفرع", invoices: "عدد الفواتير", first_purchase: "أول شراء", last_purchase: "آخر شراء",
+    spend: "مشتريات السنة", status: "حالة العميل", notes: "ملاحظات" };
   function guessRole(h) {
-    const t = String(h || "").toLowerCase();
-    if (/(تليفون|تلفون|موبايل|محمول|هاتف|رقم|phone|mobile|tel|whats|واتس)/.test(t)) return "phone";
+    const t = String(h || "").toLowerCase().trim();
+    if (!t) return "skip";
+    if (/(كما في البرنامج|مدموج|الشبكة|network|carrier)/.test(t)) return "skip";
+    if (/(كود التوصيل|رسوم التوصيل|مصاريف التوصيل|سعر التوصيل|delivery)/.test(t)) return "fee";
+    if (/(كود|code|^id$|رقم العميل)/.test(t)) return "code";
+    if (/(فواتير|فاتورة|invoices)/.test(t)) return "invoices";
+    if (/(أول شراء|اول شراء|first)/.test(t)) return "first_purchase";
+    if (/(آخر شراء|اخر شراء|last)/.test(t)) return "last_purchase";
+    if (/(مشتريات|spend|sales)/.test(t)) return "spend";
+    if (/(الحالة|حالة|status)/.test(t)) return "status";
+    if (/(الفرع|فرع|branch)/.test(t)) return "branch";
+    if (/(منطقة|المنطقة|area|zone|district)/.test(t)) return "area";
+    if (/(تليفون|تلفون|موبايل|محمول|هاتف|رقم|أرقام|ارقام|phone|mobile|tel|whats|واتس)/.test(t)) return "phone";
     if (/(لوكيشن|لوكشن|موقع|خريطة|location|map|gps|link|لينك)/.test(t)) return "location";
-    if (/(عنوان|العنوان|address|addr|منطقة|شارع|area)/.test(t)) return "address";
+    if (/(عنوان|عناوين|العنوان|address|addr|شارع)/.test(t)) return "address";
     if (/(اسم|الاسم|name|عميل|العميل|customer|client)/.test(t)) return "name";
     if (/(ملاحظ|note)/.test(t)) return "notes";
     return "skip";
   }
-  let importData = null;
+  let importData = null, importBook = null;
   function loadXLSX() {
     if (window.XLSX) return Promise.resolve();
-    return new Promise((ok, bad) => { const sc = document.createElement("script"); sc.src = "https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"; sc.onload = ok; sc.onerror = () => bad(new Error("مش قادر أحمّل قارئ Excel، اتأكد من النت")); document.head.appendChild(sc); });
+    return new Promise((ok, bad) => { const sc = document.createElement("script"); sc.src = "/vendor/xlsx/xlsx.full.min.js"; sc.onload = ok; sc.onerror = () => bad(new Error("مش قادر أحمّل قارئ Excel، اتأكد من النت")); document.head.appendChild(sc); });
+  }
+  const cellText = v => (v instanceof Date ? v.toISOString() : v == null ? "" : String(v).trim());
+  function readSheet(name) {
+    let rows = XLSX.utils.sheet_to_json(importBook.Sheets[name], { header: 1, defval: "", raw: true }).filter(r => r.some(v => cellText(v)));
+    if (!rows.length) throw new Error("الشيت ده فاضي");
+    // the header is the first row (within the first 10) that names at least 3 known columns
+    let hi = rows.slice(0, 10).findIndex(r => r.filter(v => guessRole(v) !== "skip").length >= 3);
+    const width = Math.max(...rows.slice(0, 60).map(r => r.length));
+    let headers, roles;
+    if (hi >= 0) {
+      headers = Array.from({ length: width }, (_, i) => cellText(rows[hi][i]) || "عمود " + (i + 1));
+      roles = headers.map(guessRole); rows = rows.slice(hi + 1);
+    } else {
+      headers = Array.from({ length: width }, (_, i) => "عمود " + (i + 1));
+      roles = headers.map((_, i) => { const col = rows.slice(0, 30).map(r => cellText(r[i])); return col.filter(v => v.replace(/\D/g, "").length >= 10 && !/http/.test(v)).length > col.length / 2 ? "phone" : col.some(v => /http|maps/.test(v)) ? "location" : i === 0 ? "name" : "address"; });
+    }
+    importData = { sheet: name, headers, rows, roles };
+    renderImportMap();
   }
   $("importFile").addEventListener("change", async e => {
     const f = e.target.files[0]; if (!f) return;
     $("importMap").innerHTML = `<p class="hint">بيقرا الملف…</p>`;
     try {
       await loadXLSX();
-      const wb = XLSX.read(await f.arrayBuffer(), { type: "array", raw: false });
-      let rows = XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]], { header: 1, defval: "", raw: false })
-        .filter(r => r.some(v => String(v).trim()));
-      if (!rows.length) throw new Error("الملف فاضي");
-      const width = Math.max(...rows.slice(0, 50).map(r => r.length));
-      const first = rows[0].map(String);
-      const looksData = first.some(v => (v.replace(/\D/g, "").length >= 10));
-      const headers = looksData ? Array.from({ length: width }, (_, i) => "عمود " + (i + 1)) : Array.from({ length: width }, (_, i) => first[i] || "عمود " + (i + 1));
-      if (!looksData) rows = rows.slice(1);
-      let roles = headers.map(guessRole);
-      if (looksData) roles = headers.map((_, i) => { const col = rows.slice(0, 30).map(r => String(r[i] || "")); return col.filter(v => v.replace(/\D/g, "").length >= 10 && !/http/.test(v)).length > col.length / 2 ? "phone" : col.some(v => /http|maps/.test(v)) ? "location" : i === 0 ? "name" : "address"; });
-      importData = { headers, rows, roles };
-      renderImportMap();
+      importBook = XLSX.read(await f.arrayBuffer(), { type: "array", cellDates: true });
+      // pick the sheet with the most rows (the customer list, not the summary)
+      const best = importBook.SheetNames.map(n => [n, XLSX.utils.sheet_to_json(importBook.Sheets[n], { header: 1 }).length]).sort((a, b) => b[1] - a[1])[0][0];
+      readSheet(best);
     } catch (err) { $("importMap").innerHTML = `<p class="err">${esc(err.message)}</p>`; }
   });
   function buildImportRows() {
     const { rows, roles } = importData;
     return rows.map(r => {
-      const pick = role => roles.map((x, i) => x === role ? String(r[i] ?? "").trim() : null).filter(v => v);
-      const addrs = pick("address"), locs = pick("location"), labels = pick("label");
+      const pick = role => roles.map((x, i) => (x === role ? r[i] : null)).filter(v => cellText(v));
+      const txt = role => pick(role).map(cellText);
+      const addrs = txt("address"), locs = txt("location"), labels = txt("label");
       const n = Math.max(addrs.length, locs.length);
-      const addresses = Array.from({ length: n }, (_, i) => ({ address: addrs[i] || "", location: locs[i] || "", label: labels[i] || "" }));
-      return { name: pick("name").join(" "), phones: pick("phone"), addresses, notes: pick("notes").join(" - ") };
+      const one = role => { const v = pick(role)[0]; return v instanceof Date ? v.toISOString() : v ?? null; };
+      return { code: txt("code")[0] || null, name: txt("name").join(" "), phones: txt("phone"), area: txt("area")[0] || "",
+        addresses: Array.from({ length: n }, (_, i) => ({ address: addrs[i] || "", location: locs[i] || "", label: labels[i] || "" })),
+        delivery_fee: one("fee"), branch: txt("branch")[0] || "", invoices: one("invoices"), first_purchase: one("first_purchase"),
+        last_purchase: one("last_purchase"), spend_12m: one("spend"), status: txt("status")[0] || "", notes: txt("notes").join(" - ") };
     });
   }
   function renderImportMap() {
-    const { headers, rows, roles } = importData;
+    const { headers, rows, roles, sheet: sh } = importData;
     const built = buildImportRows();
-    const withPhone = built.filter(r => r.phones.some(p => p.replace(/\D/g, "").length >= 8)).length;
-    $("importMap").innerHTML = `<p style="margin:0"><b>${rows.length}</b> صف في الملف. حدد كل عمود فيه إيه:</p>
+    const usable = built.filter(r => r.code || r.phones.some(p => p.replace(/\D/g, "").length >= 8)).length;
+    const sheets = importBook ? importBook.SheetNames : [];
+    $("importMap").innerHTML = `${sheets.length > 1 ? `<label>الشيت<select id="importSheet">${sheets.map(n => `<option ${n === sh ? "selected" : ""}>${esc(n)}</option>`).join("")}</select></label>` : ""}
+      <p style="margin:0"><b class="num">${rows.length.toLocaleString("ar-EG")}</b> صف. اتأكد إن كل عمود متحدد صح:</p>
       <div class="tablewrap"><table><thead><tr>${headers.map((h, i) => `<th><select data-col="${i}" class="colrole">${Object.entries(ROLE_LABELS).map(([k, l]) => `<option value="${k}" ${roles[i] === k ? "selected" : ""}>${l}</option>`).join("")}</select><div class="hint">${esc(h)}</div></th>`).join("")}</tr></thead>
-      <tbody>${rows.slice(0, 5).map(r => `<tr>${headers.map((_, i) => `<td>${esc(r[i])}</td>`).join("")}</tr>`).join("")}</tbody></table></div>
-      <p class="hint" style="margin:0">${withPhone} صف فيهم رقم هيتستورد. الصفوف اللي من غير رقم هتتجاهل، لأن الرقم هو اللي بيتعرف بيه العميل.</p>
-      <button class="btn primary" data-act="runImport" ${withPhone ? "" : "disabled"}>استيراد ${withPhone} عميل</button>`;
+      <tbody>${rows.slice(0, 4).map(r => `<tr>${headers.map((_, i) => `<td>${esc(r[i] instanceof Date ? fmtDate(r[i]) : r[i])}</td>`).join("")}</tr>`).join("")}</tbody></table></div>
+      <p class="hint" style="margin:0">${usable.toLocaleString("ar-EG")} عميل هيتستورد. اللي من غير كود ولا رقم هيتجاهل. لو العميل موجود قبل كده (نفس الكود أو نفس الرقم) بياناته بتتحدث ومش بيتكرر، فتقدر تعيد الاستيراد بأمان كل ما تطلع ليستة جديدة.</p>
+      <button class="btn primary" data-act="runImport" ${usable ? "" : "disabled"}>استيراد ${usable.toLocaleString("ar-EG")} عميل</button>`;
   }
-  $("importMap").addEventListener("change", e => { if (e.target.classList.contains("colrole")) { importData.roles[Number(e.target.dataset.col)] = e.target.value; renderImportMap(); } });
+  $("importMap").addEventListener("change", e => {
+    if (e.target.classList.contains("colrole")) { importData.roles[Number(e.target.dataset.col)] = e.target.value; renderImportMap(); }
+    if (e.target.id === "importSheet") { try { readSheet(e.target.value); } catch (err) { toast(err.message); } }
+  });
   async function runImport(btn) {
-    const all = buildImportRows().filter(r => r.phones.length);
+    const all = buildImportRows().filter(r => r.code || r.phones.length);
     btn.disabled = true;
     const tot = { created: 0, merged: 0, phones: 0, addresses: 0, skipped: 0 };
+    const B = 1000;
     try {
-      for (let i = 0; i < all.length; i += 500) {
-        btn.textContent = `بيستورد… ${Math.min(i + 500, all.length)} من ${all.length}`;
-        const r = await api("/api/clients/import", { method: "POST", body: { rows: all.slice(i, i + 500) } });
+      for (let i = 0; i < all.length; i += B) {
+        btn.textContent = `بيستورد… ${Math.min(i + B, all.length).toLocaleString("ar-EG")} من ${all.length.toLocaleString("ar-EG")}`;
+        const r = await api("/api/clients/import", { method: "POST", body: { rows: all.slice(i, i + B) } });
         Object.keys(tot).forEach(k => (tot[k] += r[k] || 0));
       }
-      $("importMap").innerHTML = `<div class="known"><b>الاستيراد خلص</b>: ${tot.created} عميل جديد، ${tot.merged} اتضموا لعملاء موجودين، ${tot.phones} رقم، ${tot.addresses} عنوان${tot.skipped ? `، ${tot.skipped} صف اتجاهل` : ""}.</div>`;
-      $("importFile").value = ""; importData = null; loadClients();
-    } catch (err) { toast(err.message); btn.disabled = false; btn.textContent = "جرّب تاني"; }
+      const f = n => n.toLocaleString("ar-EG");
+      $("importMap").innerHTML = `<div class="known"><b>الاستيراد خلص</b><span>${f(tot.created)} عميل جديد، و${f(tot.merged)} اتحدثت بياناتهم أو اتضموا لعميل موجود.</span><span>${f(tot.phones)} رقم و${f(tot.addresses)} عنوان اتضافوا${tot.skipped ? `، و${f(tot.skipped)} صف اتجاهل` : ""}.</span></div>`;
+      $("importFile").value = ""; importData = null; importBook = null; loadClients();
+    } catch (err) { toast(err.message); btn.disabled = false; btn.textContent = "كمّل الاستيراد"; }
+  }
+
+  /* ---------- live map ---------- */
+  let MAP = null, mapLayer = null, mapTimer = null, mapFitted = false, mapData = null;
+  const driverMarkers = {};
+  function loadLeaflet() {
+    if (window.L) return Promise.resolve();
+    return new Promise((ok, bad) => { const sc = document.createElement("script"); sc.src = "/vendor/leaflet/leaflet.js"; sc.onload = ok; sc.onerror = () => bad(new Error("مش قادر أحمّل الخريطة، اتأكد من النت")); document.head.appendChild(sc); });
+  }
+  async function openMap() {
+    await loadLeaflet();
+    if (!MAP) {
+      MAP = L.map("map", { zoomControl: true, attributionControl: true }).setView([30.13, 31.33], 13);
+      L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", { maxZoom: 19, attribution: "&copy; OpenStreetMap" }).addTo(MAP);
+      mapLayer = L.layerGroup().addTo(MAP);
+    }
+    setTimeout(() => MAP.invalidateSize(), 60);
+    await refreshMap();
+    clearInterval(mapTimer);
+    mapTimer = setInterval(() => { if (S.tab === "map" && !document.hidden) refreshMap(); }, 10000);
+  }
+  const fresh = at => at && now() - ts(at) < 3 * 60000;
+  async function refreshMap() {
+    if (!MAP) return;
+    let r;
+    try { r = await api("/api/live"); } catch (e) { $("mapStatus").textContent = "مش قادر يجيب المواقع، بيحاول تاني"; return; }
+    S.skew = Date.parse(r.now) - Date.now(); mapData = r;
+    mapLayer.clearLayers();
+    const pts = [];
+    const colorOf = d => (fresh(d.at) ? "drv" : "drv stale");
+    r.drivers.forEach(d => {
+      const t = r.trails[d.id];
+      if (t && t.length > 1) L.polyline(t, { color: "#3A6FB0", weight: 3, opacity: .35 }).addTo(mapLayer);
+    });
+    r.orders.forEach(o => {
+      if (o.lat == null) return;
+      pts.push([o.lat, o.lng]);
+      const icon = L.divIcon({ className: "", html: `<div class="pin ${o.status === "out" ? "out" : "wait"}"><b>${o.no}</b></div>`, iconSize: [30, 30], iconAnchor: [15, 30] });
+      L.marker([o.lat, o.lng], { icon }).bindPopup(`<b>#${o.no} · ${esc(o.customer)}</b><br>${esc(o.address)}${o.area ? "<br>" + esc(o.area) : ""}`).addTo(mapLayer);
+      const d = o.status === "out" && r.drivers.find(x => x.id === o.driver_id);
+      if (d && d.lat != null) L.polyline([[d.lat, d.lng], [o.lat, o.lng]], { color: "#3A6FB0", weight: 2, dashArray: "6 6", opacity: .8 }).addTo(mapLayer);
+    });
+    r.drivers.forEach(d => {
+      if (d.lat == null) return;
+      pts.push([d.lat, d.lng]);
+      const icon = L.divIcon({ className: "", html: `<div class="drvpin ${colorOf(d)}"><span>${esc((d.name || "?").trim().charAt(0))}</span><em>${esc(d.name)}</em></div>`, iconSize: [36, 36], iconAnchor: [18, 18] });
+      driverMarkers[d.id] = L.marker([d.lat, d.lng], { icon, zIndexOffset: 1000 }).bindPopup(`<b>${esc(d.name)}</b><br>آخر تحديث من ${ago(d.at)}${d.battery != null ? `<br>البطارية ${Math.round(d.battery)}%` : ""}`).addTo(mapLayer);
+    });
+    if (r.pharmacy) {
+      pts.push([r.pharmacy.lat, r.pharmacy.lng]);
+      L.marker([r.pharmacy.lat, r.pharmacy.lng], { zIndexOffset: 500, icon: L.divIcon({ className: "", html: `<div class="shoppin">+</div>`, iconSize: [34, 34], iconAnchor: [17, 17] }) })
+        .bindPopup(`<b>${esc(r.pharmacy.name)}</b>`).addTo(mapLayer);
+    }
+    if (!mapFitted && pts.length) { MAP.fitBounds(pts, { padding: [40, 40], maxZoom: 15 }); mapFitted = true; }
+    $("mapStatus").textContent = `بيتحدث كل 10 ثواني · آخر تحديث ${clock(new Date())}`;
+    renderDriverCards(r);
+  }
+  function renderDriverCards(r) {
+    $("driverCards").innerHTML = r.drivers.map(d => {
+      const mine = r.orders.filter(o => o.driver_id === d.id && o.status === "out");
+      const waiting = r.orders.filter(o => o.driver_id === d.id && o.status !== "out").length;
+      const state = d.at == null ? `<span class="pill">لسه مبعتش موقعه</span>` : fresh(d.at) ? `<span class="pill okp"><i class="dot"></i>متصل · من ${ago(d.at)}</span>` : `<span class="pill warnp">آخر ظهور من ${ago(d.at)}</span>`;
+      const orders = mine.map(o => `<li>#${o.no} · ${esc(o.customer)}${o.lat != null && d.lat != null ? ` · <b class="num">${fmtKm(distKm(d.lat, d.lng, o.lat, o.lng) * 1.3)}</b>` : o.lat == null ? ` · <span class="hint">مفيش لوكيشن</span>` : ""}
+        <span class="hint">خرج من ${ago(o.out_at)}</span></li>`).join("");
+      return `<div class="card drvcard">
+        <div class="top"><b>${esc(d.name)}</b>${state}</div>
+        ${mine.length ? `<ul class="drvorders">${orders}</ul>` : `<div class="hint">مفيش أوردرات معاه في الطريق${waiting ? ` · ${waiting} مستنيين يخرج بيهم` : ""}</div>`}
+        <div class="row">${d.lat != null ? `<button class="btn small" data-act="focusDriver" data-id="${d.id}">اظهر على الخريطة</button>` : ""}
+        ${d.phone ? `<a class="btn small" href="tel:${esc(d.phone)}">اتصال</a>` : ""}${d.battery != null ? `<span class="hint">البطارية ${Math.round(d.battery)}%</span>` : ""}</div></div>`;
+    }).join("") || `<div class="empty">مفيش طيارين متسجلين. ضيفهم من تبويب الفريق.</div>`;
+  }
+  function focusDriver(id) {
+    const m = driverMarkers[id]; if (!m || !MAP) return;
+    MAP.flyTo(m.getLatLng(), 16, { duration: .6 }); m.openPopup();
+    $("map").scrollIntoView({ behavior: "smooth", block: "center" });
   }
 
   /* ---------- users ---------- */
@@ -498,7 +717,7 @@
     sheet(`<h2>تسليم أوردر #${o.no}</h2>
       <p class="hint" style="margin:0">اتحصّل إزاي؟</p>
       <div class="methods">${METHODS.map(m => `<button class="chip" data-act="pickMethod" data-id="${o.id}" data-m="${m}" aria-pressed="${m === def}">${m}</button>`).join("")}</div>
-      <label>المبلغ اللي اتحصّل (جنيه)<input id="collAmount" type="number" inputmode="decimal" min="0" value="${def === "مدفوع مسبقًا" ? 0 : (Number(o.amount) || "")}"></label>
+      <label>المبلغ اللي اتحصّل (جنيه)<input id="collAmount" type="number" inputmode="decimal" min="0" value="${def === "مدفوع مسبقًا" ? 0 : ((Number(o.amount) + Number(o.delivery_fee || 0)) || "")}"></label>
       <div class="row"><button class="btn primary big" style="flex:1" data-act="confirmDone" data-id="${o.id}">اتسلم واتحصّل</button><button class="btn" data-act="closeSheet">رجوع</button></div>`);
   }
 
@@ -529,7 +748,7 @@
       case "pickMethod":
         document.querySelectorAll("[data-act=pickMethod]").forEach(b => b.setAttribute("aria-pressed", b === a));
         if (a.dataset.m === "مدفوع مسبقًا") $("collAmount").value = "0";
-        else if ($("collAmount").value === "0" && o) $("collAmount").value = Number(o.amount) || "";
+        else if ($("collAmount").value === "0" && o) $("collAmount").value = (Number(o.amount) + Number(o.delivery_fee || 0)) || "";
         break;
       case "confirmDone": {
         const m = document.querySelector("[data-act=pickMethod][aria-pressed=true]");
@@ -545,10 +764,22 @@
       }
       case "copy": {
         if (!o) return;
-        const txt = o.status === "out"
-          ? `أهلاً ${o.customer}، أوردرك من الصيدلية خرج دلوقتي مع ${o.driver_name || "الطيار"} وهيوصلك خلال دقايق.${Number(o.amount) ? ` المطلوب ${Number(o.amount)} جنيه (${o.payment}).` : ""}`
-          : `أوردر #${o.no}\n${o.customer} - ${o.phone}\n${o.address}\n${o.items || ""}\n${Number(o.amount) ? Number(o.amount) + " ج - " : ""}${o.payment || ""}`;
-        copyText(txt); break;
+        const total = Number(o.amount) + Number(o.delivery_fee || 0);
+        if (o.status === "out") {
+          a.disabled = true;
+          let link = "";
+          try { link = (await api(`/api/orders/${id}/track-link`, { method: "POST" })).url; } catch (err) {}
+          a.disabled = false;
+          const msg = `أهلاً ${o.customer}، أوردرك من الصيدلية خرج دلوقتي مع ${o.driver_name || "الطيار"}.` +
+            (total ? ` المطلوب ${total} جنيه (${o.payment}).` : "") + (link ? `\nتقدر تتابع الطيار وهو جاي على الخريطة من هنا:\n${link}` : "");
+          sheet(`<h2>رسالة خروج أوردر #${o.no}</h2>
+            ${o.phone ? `<a class="btn primary big" href="${esc(waLink(o.phone, msg))}" target="_blank" rel="noopener" data-act="closeSheet">ابعتها على واتساب</a>` : ""}
+            <textarea id="copyArea" rows="5" readonly>${esc(msg)}</textarea>
+            <div class="row"><button class="btn" data-act="copyMsg">نسخ الرسالة</button><button class="btn" data-act="closeSheet">رجوع</button></div>`);
+          break;
+        }
+        copyText(`أوردر #${o.no}\n${o.customer} - ${o.phone}\n${o.address}${o.area ? " (" + o.area + ")" : ""}\n${o.items || ""}\n${total ? total + " ج - " : ""}${o.payment || ""}`);
+        break;
       }
       case "toggleUser": {
         const u = S.users.find(x => x.id === id); if (!u) return;
@@ -600,7 +831,7 @@
       case "createClient": {
         const c = await clientCall("/api/clients", "POST", { name: $("nc-name").value, phone: $("nc-phone").value }, "العميل اتضاف"); break;
       }
-      case "saveClient": await clientCall(`/api/clients/${openClient.id}`, "PATCH", { name: $("ec-name").value, notes: $("ec-notes").value }, "اتحفظ"); break;
+      case "saveClient": await clientCall(`/api/clients/${openClient.id}`, "PATCH", { name: $("ec-name").value, notes: $("ec-notes").value, area: $("ec-area").value, delivery_fee: $("ec-fee").value }, "اتحفظ"); break;
       case "addPhone": await clientCall(`/api/clients/${openClient.id}/phones`, "POST", { phone: $("ec-phone").value }, "الرقم اتضاف"); break;
       case "delPhone":
         if (a.dataset.confirm !== "1") { a.dataset.confirm = "1"; a.textContent = "متأكد؟"; break; }
@@ -619,6 +850,17 @@
         try { await api(`/api/clients/${openClient.id}`, { method: "DELETE" }); closeSheet(); toast("العميل اتحذف"); loadClients(); } catch (err) { toast(err.message); }
         break;
       case "runImport": await runImport(a); break;
+      case "pickClient": {
+        try {
+          const c = await api("/api/clients/" + id);
+          $("f-results").hidden = true; $("f-search").value = "";
+          if (!c.phones.includes(normPhone($("f-phone").value))) $("f-phone").value = c.phones[0] || "";
+          $("f-customer").value = c.name || "";
+          resetKnown(); useClient(c); $("f-items").focus();
+        } catch (err) { toast(err.message); }
+        break;
+      }
+      case "focusDriver": focusDriver(Number(a.dataset.id)); break;
       case "savePin":
         try { await api("/api/users/" + id, { method: "PATCH", body: { pin: $("newPin").value } }); closeSheet(); toast("الرقم السري اتغيّر"); } catch (err) { toast(err.message); }
         break;
@@ -630,15 +872,62 @@
       if (await act(Number(t.dataset.id), { action: "assign", driver_id: t.value ? Number(t.value) : null })) toast(t.value ? "اتوزع" : "اتشال الطيار");
     }
   });
-  $("toggleForm").addEventListener("click", () => { const f = $("orderForm"); f.hidden = !f.hidden; if (!f.hidden) $("f-customer").focus(); });
+  $("toggleForm").addEventListener("click", () => { const f = $("orderForm"); f.hidden = !f.hidden; if (!f.hidden) $("f-search").focus(); });
   $("cancelForm").addEventListener("click", () => { $("orderForm").hidden = true; $("orderForm").reset(); resetKnown(); });
   let knownCustomer = null, pickedAddress = null;
-  function resetKnown() { knownCustomer = null; pickedAddress = null; $("known").hidden = true; $("known").innerHTML = ""; $("f-location-wrap").hidden = false; }
+  function resetKnown() {
+    knownCustomer = null; pickedAddress = null; $("known").hidden = true; $("known").innerHTML = ""; $("f-location-wrap").hidden = false;
+    if ($("f-fee").dataset.auto === "1") { $("f-fee").value = ""; $("f-fee").dataset.auto = ""; }
+    updateTotal();
+  }
+  function updateTotal() {
+    const a = Number($("f-amount").value) || 0, f = Number($("f-fee").value) || 0;
+    $("f-total").hidden = !(a || f);
+    $("f-total").innerHTML = `الإجمالي على العميل: <b class="num">${money(a + f)}</b>`;
+  }
+  $("f-amount").addEventListener("input", updateTotal);
+  $("f-fee").addEventListener("input", () => { $("f-fee").dataset.auto = ""; updateTotal(); });
+  const fmtDate = v => (v ? new Date(v).toLocaleDateString("ar-EG", { day: "numeric", month: "short", year: "numeric" }) : "—");
+  function statusClass(st) { return /نشط/.test(st) ? "okp" : /خامل|لم يشتر/.test(st) ? "warnp" : ""; }
+  function clientFacts(c) {
+    const bits = [];
+    if (c.code) bits.push(`كود <b class="num">${esc(c.code)}</b>`);
+    if (c.status) bits.push(`<span class="pill ${statusClass(c.status)}">${esc(c.status)}</span>`);
+    if (c.last_purchase) bits.push(`آخر شراء ${fmtDate(c.last_purchase)}`);
+    if (c.invoices) bits.push(`${c.invoices} فاتورة`);
+    if (Number(c.spend_12m)) bits.push(`مشتريات السنة ${money(c.spend_12m)}`);
+    if (c.delivery_fee != null) bits.push(`التوصيل ${money(c.delivery_fee)}`);
+    return bits.length ? `<div class="facts">${bits.join("<span class='sep'>·</span>")}</div>` : "";
+  }
+  let searchT;
+  $("f-search").addEventListener("input", () => {
+    clearTimeout(searchT);
+    const t = $("f-search").value.trim();
+    if (t.length < 2) { $("f-results").hidden = true; return; }
+    searchT = setTimeout(async () => {
+      try {
+        const r = await api("/api/clients?q=" + encodeURIComponent(t));
+        if ($("f-search").value.trim() !== t) return;
+        $("f-results").innerHTML = r.clients.length ? r.clients.slice(0, 8).map(c => `<button type="button" class="res" data-act="pickClient" data-id="${c.id}">
+            <span class="res-top"><b>${esc(c.name || "بدون اسم")}</b>${c.code ? `<span class="hint num">كود ${esc(c.code)}</span>` : ""}</span>
+            <span class="hint num">${(c.phones || []).map(esc).join(" / ")}</span>
+            ${c.area ? `<span class="hint">${esc(c.area)}</span>` : ""}</button>`).join("")
+          : `<div class="hint" style="padding:10px">مفيش عميل بالبحث ده. اكتب بياناته تحت وهيتسجل عميل جديد.</div>`;
+        $("f-results").hidden = false;
+      } catch (e) {}
+    }, 250);
+  });
+  $("f-search").addEventListener("keydown", e => {
+    if (e.key === "Enter") { e.preventDefault(); const b = $("f-results").querySelector(".res"); if (b) b.click(); }
+    if (e.key === "Escape") $("f-results").hidden = true;
+  });
   function renderKnown() {
     const c = knownCustomer; if (!c) return;
     const addrs = c.addresses.map(a => `<label class="addr-opt"><input type="radio" name="addrPick" value="${a.id}" ${pickedAddress === a.id ? "checked" : ""}>
-        <span>${a.label ? `<b>${esc(a.label)}</b> · ` : ""}${esc(a.address || "لوكيشن بس")} ${a.lat != null || a.location_url ? `<span class="pill okp">لوكيشن ✓</span>` : ""}</span></label>`).join("");
+        <span>${a.label ? `<b>${esc(a.label)}</b> · ` : ""}${esc(a.address || "لوكيشن بس")}${a.area ? ` <span class="pill area">${esc(a.area)}</span>` : ""} ${a.lat != null || a.location_url ? `<span class="pill okp">لوكيشن ✓</span>` : ""}</span></label>`).join("");
     $("known").innerHTML = `<div><b>${esc(c.name || "عميل")}</b> · ${c.orders_count} أوردر قبل كده${c.phones.length > 1 ? ` · <span class="num">${c.phones.map(esc).join(" / ")}</span>` : ""}</div>
+      ${clientFacts(c)}
+      ${c.shared && c.shared.length ? `<div class="shared">الرقم ده متسجل كمان لـ: ${c.shared.map(x => `<button type="button" class="btn small" data-act="pickClient" data-id="${x.id}">${esc(x.name || "بدون اسم")}${x.code ? " · كود " + esc(x.code) : ""}</button>`).join("")}</div>` : ""}
       ${c.notes ? `<div class="hint">${esc(c.notes)}</div>` : ""}
       ${c.addresses.length ? `<div class="addr-list">${addrs}<label class="addr-opt"><input type="radio" name="addrPick" value="" ${pickedAddress ? "" : "checked"}><span>عنوان جديد</span></label></div>` : `<span class="hint">مفيش عناوين محفوظة</span>`}`;
     $("known").hidden = false;
@@ -664,6 +953,8 @@
   function useClient(c, addressId) {
     knownCustomer = c;
     if (!$("f-customer").value.trim() && c.name) $("f-customer").value = c.name;
+    if (c.delivery_fee != null && (!$("f-fee").value || $("f-fee").dataset.auto === "1")) { $("f-fee").value = c.delivery_fee; $("f-fee").dataset.auto = "1"; }
+    updateTotal();
     renderKnown();
     pickAddress(addressId || (c.addresses[0] && c.addresses[0].id));
     renderKnown();
@@ -687,10 +978,10 @@
     try {
       const o = await api("/api/orders", { method: "POST", body: {
         customer: $("f-customer").value, phone: $("f-phone").value, address: $("f-address").value, items: $("f-items").value,
-        amount: $("f-amount").value, source: $("f-source").value, payment: $("f-payment").value, promise_min: Number($("f-promise").value),
+        amount: $("f-amount").value, delivery_fee: $("f-fee").value, source: $("f-source").value, payment: $("f-payment").value, promise_min: Number($("f-promise").value),
         location: $("f-location-wrap").hidden ? "" : $("f-location").value,
         client_id: knownCustomer ? knownCustomer.id : null, address_id: pickedAddress } });
-      e.target.reset(); resetKnown(); $("f-promise").value = "60"; e.target.hidden = true; S.filter = "active";
+      e.target.reset(); resetKnown(); $("f-results").hidden = true; $("f-promise").value = "60"; e.target.hidden = true; S.filter = "active";
       toast("الأوردر اتسجل #" + o.no + (o.lat != null || o.location_url ? " باللوكيشن" : "")); await refresh();
     } catch (err) { toast(err.message); }
     btn.disabled = false;
@@ -700,6 +991,7 @@
 
   if ("serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js").catch(() => {});
 
+  loadShop();
   try { S.token = localStorage.getItem("token"); } catch (e) {}
   if (S.token) start().catch(() => showLogin()); else showLogin();
 })();

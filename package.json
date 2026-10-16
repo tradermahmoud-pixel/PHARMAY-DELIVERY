@@ -4,7 +4,16 @@
   "private": true,
   "description": "Pharmacy delivery dispatch app",
   "main": "server.js",
-  "engines": { "node": ">=20" },
-  "scripts": { "start": "node server.js" },
-  "dependencies": { "express": "4.21.2", "pg": "8.13.1" }
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "express": "4.21.2",
+    "leaflet": "1.9.4",
+    "pg": "8.13.1",
+    "xlsx": "0.18.5"
+  }
 }

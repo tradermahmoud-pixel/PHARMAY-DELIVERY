@@ -12,6 +12,7 @@
 <link rel="apple-touch-icon" href="/icon-192.png">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans+Arabic:wght@400;500;600&family=Readex+Pro:wght@500;700&display=swap">
+<link rel="stylesheet" href="/vendor/leaflet/leaflet.css">
 <link rel="stylesheet" href="/styles.css">
 </head>
 <body>
@@ -20,7 +21,7 @@
   <section id="login" class="login" hidden>
     <div class="brand">
       <img src="/icon-192.png" alt="" width="56" height="56">
-      <h1>توصيل الصيدلية</h1>
+      <div><h1 class="js-shop">توصيل الصيدلية</h1><div class="hint">نظام التوصيل</div></div>
     </div>
     <form id="loginForm" class="panel" autocomplete="off">
       <label>الاسم<select id="l-user" required></select></label>
@@ -33,10 +34,10 @@
   <!-- App -->
   <section id="app" hidden>
     <header class="topbar">
-      <div>
-        <h1>توصيل الصيدلية</h1>
+      <div class="brand small"><img src="/icon-192.png" alt="" width="36" height="36"><div>
+        <h1 class="js-shop">توصيل الصيدلية</h1>
         <div class="hint"><span id="whoami"></span> · <span id="sync">متصل</span></div>
-      </div>
+      </div></div>
       <button class="btn small" id="logout">خروج</button>
     </header>
 
@@ -52,6 +53,10 @@
       </div>
       <form id="orderForm" class="panel" hidden autocomplete="off">
         <h2>أوردر جديد</h2>
+        <div class="search-wrap">
+          <label>ابحث عن العميل<input id="f-search" type="search" placeholder="الاسم أو الموبايل أو كود العميل" autocomplete="off"></label>
+          <div id="f-results" class="results" hidden></div>
+        </div>
         <div class="grid2">
           <label>اسم العميل<input id="f-customer" required></label>
           <label>الموبايل<input id="f-phone" inputmode="tel" placeholder="01xxxxxxxxx"></label>
@@ -62,11 +67,13 @@
         <p class="hint" style="margin:0">مفيش لوكيشن؟ سجّل الأوردر، وبعدين دوس "اطلب اللوكيشن" تحت الأوردر ويتبعت للعميل لينك يبعت بيه موقعه بضغطة.</p>
         <label>الطلب<textarea id="f-items" placeholder="الأصناف، أو: الروشتة على الواتساب"></textarea></label>
         <div class="grid2">
-          <label>المبلغ (جنيه)<input id="f-amount" type="number" inputmode="decimal" min="0"></label>
+          <label>قيمة الطلب (جنيه)<input id="f-amount" type="number" inputmode="decimal" min="0"></label>
+          <label>التوصيل (جنيه)<input id="f-fee" type="number" inputmode="decimal" min="0" placeholder="0"></label>
           <label>جه منين<select id="f-source"><option>واتساب</option><option>تليفون</option></select></label>
           <label>وعد التوصيل (دقيقة)<select id="f-promise"><option>30</option><option>45</option><option selected>60</option><option>90</option></select></label>
           <label>طريقة الدفع<select id="f-payment"><option>نقدي</option><option>فيزا</option><option>انستاباي</option><option>محفظة</option><option>مدفوع مسبقًا</option></select></label>
         </div>
+        <div class="total-line" id="f-total" hidden></div>
         <div class="row">
           <button class="btn primary" type="submit">سجّل الأوردر</button>
           <button class="btn" type="button" id="cancelForm">إلغاء</button>
@@ -76,8 +83,18 @@
       <div class="list" id="orderList"></div>
     </section>
 
+    <!-- Live map -->
+    <section id="tab-map" class="list" hidden>
+      <div class="map-wrap"><div id="map" dir="ltr" role="application" aria-label="خريطة الطيارين والأوردرات"></div>
+        <div class="map-legend"><span><i class="lg shop"></i>الصيدلية</span><span><i class="lg drv"></i>طيار</span><span><i class="lg out"></i>مع الطيار</span><span><i class="lg wait"></i>لسه في الصيدلية</span></div>
+      </div>
+      <div class="hint" id="mapStatus"></div>
+      <div class="list" id="driverCards"></div>
+    </section>
+
     <!-- Driver -->
     <section id="tab-driver" class="list" hidden>
+      <div id="trackBar" class="trackbar" hidden></div>
       <div class="hint" id="driverStats"></div>
       <div class="list" id="driverList"></div>
     </section>
@@ -109,6 +126,13 @@
     </section>
 
     <section id="tab-users" class="list" hidden>
+      <form id="shopForm" class="panel" autocomplete="off">
+        <h2>بيانات الصيدلية</h2>
+        <label>اسم الصيدلية (بيظهر للعملاء في لينك التتبع)<input id="s-name" maxlength="60"></label>
+        <label>موقع الصيدلية على الخريطة<input id="s-loc" placeholder="الصق لينك جوجل ماب للصيدلية"></label>
+        <div class="row"><button class="btn primary" type="submit">حفظ</button><button class="btn" type="button" id="s-here">أنا في الصيدلية: استخدم موقعي الحالي</button></div>
+        <p class="hint" id="s-status" style="margin:0"></p>
+      </form>
       <div id="userList" class="list"></div>
       <form id="userForm" class="panel" autocomplete="off">
         <h2>إضافة مستخدم</h2>
