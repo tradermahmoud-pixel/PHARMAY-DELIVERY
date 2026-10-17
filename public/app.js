@@ -407,67 +407,232 @@
   }
 
   /* ---------- report ---------- */
-  async function loadReport() {
-    $("reportBody").innerHTML = `<div class="empty">بيحمّل التقرير…</div>`;
-    try {
-      const r = await api(`/api/report?from=${$("r-from").value}&to=${$("r-to").value}`);
-      renderReport(r);
-    } catch (e) { $("reportBody").innerHTML = `<div class="empty">${esc(e.message)}</div>`; }
+  const RF = { preset: "today", driver: "", staff: "", method: "", area: "", source: "", status: "", client: "", clientName: "" };
+  const RS = { data: null, sort: {}, shown: 100, search: "" };
+  const PRESETS = [["today", "النهارده"], ["yesterday", "امبارح"], ["7", "آخر 7 أيام"], ["30", "آخر 30 يوم"], ["month", "الشهر ده"], ["lastmonth", "الشهر اللي فات"], ["custom", "فترة تانية"]];
+  const ymd = d => d.toLocaleDateString("en-CA", { timeZone: "Africa/Cairo" });
+  function presetRange(p) {
+    const t = new Date(S.today + "T12:00:00"), d = n => { const x = new Date(t); x.setDate(x.getDate() + n); return ymd(x); };
+    if (p === "today") return [S.today, S.today];
+    if (p === "yesterday") return [d(-1), d(-1)];
+    if (p === "7") return [d(-6), S.today];
+    if (p === "30") return [d(-29), S.today];
+    if (p === "month") return [S.today.slice(0, 8) + "01", S.today];
+    if (p === "lastmonth") { const a = new Date(t.getFullYear(), t.getMonth() - 1, 1), b = new Date(t.getFullYear(), t.getMonth(), 0); return [ymd(a), ymd(b)]; }
+    return [$("r-from").value || S.today, $("r-to").value || S.today];
   }
-  $("r-from").addEventListener("change", loadReport);
-  $("r-to").addEventListener("change", loadReport);
+  const STATUS_F = [["", "كل الحالات"], ["done", "اتسلم"], ["late", "اتسلم متأخر"], ["cancel", "اتلغى"], ["active", "لسه شغال"]];
+  const WEEKDAYS = ["", "الاتنين", "التلات", "الأربع", "الخميس", "الجمعة", "السبت", "الحد"];
+  function renderReportControls() {
+    $("r-presets").innerHTML = PRESETS.map(([k, l]) => `<button class="chip" data-rpreset="${k}" aria-pressed="${RF.preset === k}">${l}</button>`).join("");
+    const o = (RS.data && RS.data.options) || { drivers: [], staff: [], areas: [], methods: [], sources: [] };
+    const sel = (k, label, list) => `<label>${label}<select data-rf="${k}"><option value="">الكل</option>${list.map(([v, t]) => `<option value="${esc(v)}" ${String(RF[k]) === String(v) ? "selected" : ""}>${esc(t)}</option>`).join("")}</select></label>`;
+    $("r-filters").innerHTML =
+      sel("driver", "الطيار", o.drivers.map(u => [u.id, u.name])) +
+      sel("staff", "سجّله", o.staff.map(u => [u.id, u.name])) +
+      sel("area", "المنطقة", o.areas.map(a => [a, a])) +
+      sel("method", "الدفع", o.methods.map(a => [a, a])) +
+      sel("source", "جه منين", o.sources.map(a => [a, a])) +
+      `<label>الحالة<select data-rf="status">${STATUS_F.map(([v, t]) => `<option value="${v}" ${RF.status === v ? "selected" : ""}>${t}</option>`).join("")}</select></label>`;
+    const nameOf = (k, v) => k === "driver" ? (o.drivers.find(u => String(u.id) === String(v)) || {}).name : k === "staff" ? (o.staff.find(u => String(u.id) === String(v)) || {}).name
+      : k === "status" ? (STATUS_F.find(x => x[0] === v) || [])[1] : k === "client" ? RF.clientName : v;
+    const lbl = { driver: "الطيار", staff: "سجّله", area: "المنطقة", method: "الدفع", source: "جه منين", status: "الحالة", client: "العميل" };
+    const act = Object.keys(lbl).filter(k => RF[k]);
+    $("r-active").innerHTML = act.length ? act.map(k => `<button class="chip on" data-rclear="${k}">${lbl[k]}: ${esc(nameOf(k, RF[k]) || RF[k])} ✕</button>`).join("") +
+      (act.length > 1 ? `<button class="chip" data-rclear="all">مسح الكل</button>` : "") : `<span class="hint">دوس على أي صف في الجداول تحت عشان تفلتر بيه</span>`;
+  }
+  async function loadReport() {
+    if (RF.preset !== "custom") { const [a, b] = presetRange(RF.preset); $("r-from").value = a; $("r-to").value = b; }
+    renderReportControls();
+    $("reportBody").innerHTML = `<div class="empty">بيحمّل التقرير…</div>`;
+    const qs = new URLSearchParams({ from: $("r-from").value, to: $("r-to").value });
+    ["driver", "staff", "method", "area", "source", "status", "client"].forEach(k => RF[k] && qs.set(k, RF[k]));
+    try { RS.data = await api("/api/report?" + qs); RS.shown = 100; renderReportControls(); renderReport(); }
+    catch (e) { $("reportBody").innerHTML = `<div class="empty">${esc(e.message)}</div>`; }
+  }
+  $("r-from").addEventListener("change", () => { RF.preset = "custom"; loadReport(); });
+  $("r-to").addEventListener("change", () => { RF.preset = "custom"; loadReport(); });
+  $("r-filters").addEventListener("change", e => { const k = e.target.dataset.rf; if (k) { RF[k] = e.target.value; loadReport(); } });
+  function setFilter(k, v, label) { RF[k] = String(v); if (k === "client") RF.clientName = label || ""; loadReport(); $("tab-report").scrollIntoView({ behavior: "smooth" }); }
 
-  function renderReport(r) {
-    const s = r.summary;
+  const pct = (a, b) => (b ? Math.round(a * 100 / b) : null);
+  function delta(cur, prev, goodUp) {
+    if (prev == null || cur == null || !isFinite(prev) || !isFinite(cur)) return "";
+    if (prev === 0) return cur ? `<em class="dl">جديد</em>` : "";
+    const d = Math.round((cur - prev) * 100 / Math.abs(prev));
+    if (!d) return `<em class="dl">زي الفترة اللي قبلها</em>`;
+    const good = goodUp ? d > 0 : d < 0;
+    return `<em class="dl ${good ? "up" : "down"}">${d > 0 ? "▲" : "▼"} ${Math.abs(d)}%</em>`;
+  }
+  function sortRows(id, rows, def) {
+    const st = RS.sort[id] || def; if (!st) return rows;
+    return rows.slice().sort((a, b) => { const x = a[st.k], y = b[st.k];
+      const c = typeof x === "number" || typeof y === "number" ? (Number(x) || 0) - (Number(y) || 0) : String(x ?? "").localeCompare(String(y ?? ""), "ar");
+      return st.dir === "asc" ? c : -c; });
+  }
+  // a sortable table; clicking a row applies it as a filter
+  function table(id, cols, rows, opts) {
+    opts = opts || {};
+    const st = RS.sort[id] || opts.sort;
+    const list = sortRows(id, rows, opts.sort);
+    if (!list.length) return `<p class="hint" style="margin:0">${opts.empty || "مفيش بيانات في الفترة دي."}</p>`;
+    const totals = opts.totals ? `<tfoot><tr>${cols.map((c, i) => `<td class="${c.num ? "n" : ""}"><b>${i === 0 ? "الإجمالي" : c.total ? c.fmt(list.reduce((a, r) => a + (Number(r[c.k]) || 0), 0), null, true) : ""}</b></td>`).join("")}</tr></tfoot>` : "";
+    return `<div class="tablewrap"><table class="rep-t"><thead><tr>${cols.map(c => `<th class="${c.num ? "n" : ""}"><button data-rsort="${id}" data-k="${c.k}">${c.label}${st && st.k === c.k ? (st.dir === "asc" ? " ↑" : " ↓") : ""}</button></th>`).join("")}</tr></thead>
+      <tbody>${list.map(r => `<tr ${opts.filter ? `class="clickable" data-rfilter="${opts.filter}" data-v="${esc(r[opts.fkey || "id"])}" data-label="${esc(r.name || "")}"` : ""}>${cols.map(c => `<td class="${c.num ? "n" : ""}">${c.fmt ? c.fmt(r[c.k], r) : esc(r[c.k] ?? "—")}</td>`).join("")}</tr>`).join("")}</tbody>${totals}</table></div>`;
+  }
+  const n0 = v => (v == null ? "—" : Number(v).toLocaleString("ar-EG"));
+  const mfmt = (v, r, tot) => (v == null ? "—" : money(v));
+  const latePct = (v, r) => (r && r.done ? `${n0(v)} <span class="hint">(${pct(v, r.done)}%)</span>` : n0(v));
+  const cancPct = (v, r) => (r && r.n ? `${n0(v)} <span class="hint">(${pct(v, r.n)}%)</span>` : n0(v));
+  const GROUP = [{ k: "n", label: "أوردرات", num: 1, fmt: n0, total: 1 }, { k: "done", label: "اتسلم", num: 1, fmt: n0, total: 1 },
+    { k: "cancelled", label: "اتلغى", num: 1, fmt: cancPct, total: 1 }, { k: "late", label: "متأخر", num: 1, fmt: latePct, total: 1 },
+    { k: "sales", label: "المبيعات", num: 1, fmt: mfmt, total: 1 }, { k: "avg_total", label: "متوسط الوقت", num: 1, fmt: v => fmtMin(v) }];
+
+  // bars over time or categories; one measure per chart
+  function bars(rows, opts) {
+    const max = Math.max(1, ...rows.map(r => r.v));
+    const maxAt = rows.findIndex(r => r.v === max);
+    const step = Math.ceil(rows.length / 16);
+    return `<div class="vbars" role="img" aria-label="${esc(opts.aria)}">${rows.map((r, i) => {
+      const h = r.v / max * 100, hc = (r.c || 0) / max * 100;
+      return `<div class="vb" title="${esc(r.tip)}"><span class="vv num">${r.v && (rows.length <= 16 || i === maxAt) ? opts.fmt(r.v) : ""}</span>
+        <div class="vcol">${hc ? `<i class="c" style="height:${hc}%"></i>` : ""}<i style="height:${Math.max(h - hc, r.v ? 1.5 : 0)}%"></i></div>
+        <span class="vl num">${i % step === 0 ? esc(r.l) : ""}</span></div>`; }).join("")}</div>`;
+  }
+
+  function renderReport() {
+    const r = RS.data, s = r.summary, p = r.prev;
+    const onTime = pct(s.on_time, s.done), pOnTime = pct(p.on_time, p.done);
+    const cRate = pct(s.cancelled, s.total), pCRate = pct(p.cancelled, p.total);
+    const tile = (label, val, d, extra) => `<div class="tile kpi"><span>${label}</span><b>${val}</b>${d || ""}${extra ? `<small class="hint">${extra}</small>` : ""}</div>`;
     const stages = [["التجهيز في الصيدلية", s.avg_prep, "var(--muted)"], ["مستني طيار", s.avg_wait, "var(--warn)"], ["في الطريق", s.avg_road, "var(--out)"]];
-    const total = stages.reduce((a, x) => a + (x[2] && x[1] || 0), 0);
-    const worst = total ? stages.slice().sort((a, b) => (b[1] || 0) - (a[1] || 0))[0] : null;
-    const advice = !worst ? "" : worst[0] === "مستني طيار"
-      ? "محتاج طيار زيادة في ساعات الذروة، أو تجمّع أوردرات المنطقة الواحدة في خروجة واحدة."
-      : worst[0] === "التجهيز في الصيدلية"
-        ? "خلي حد مسؤول يجهز أول ما الأوردر يتسجل، وجهّز الأصناف الأكتر طلبًا مسبقًا."
-        : "راجع توزيع المناطق، وابعت الأوردرات القريبة من بعض مع نفس الطيار.";
-    const pctOn = s.done ? Math.round(s.on_time * 100 / s.done) : null;
-    const pctC = s.total ? Math.round(s.cancelled * 100 / s.total) : 0;
-    const maxH = Math.max(1, ...r.hours.map(h => h.n));
-    const hoursMap = Object.fromEntries(r.hours.map(h => [h.h, h]));
-    const hs = r.hours.map(h => h.h); const hrs = []; for (let h = Math.min(8, ...hs); h <= Math.max(23, ...hs); h++) hrs.push(h);
+    const stTotal = stages.reduce((a, x) => a + (x[1] || 0), 0);
+    const worst = stTotal ? stages.slice().sort((a, b) => (b[1] || 0) - (a[1] || 0))[0] : null;
+    const advice = !worst ? "" : worst[0] === "مستني طيار" ? "محتاج طيار زيادة في ساعات الذروة، أو تجمّع أوردرات المنطقة الواحدة في خروجة واحدة."
+      : worst[0] === "التجهيز في الصيدلية" ? "خلي حد مسؤول يجهز أول ما الأوردر يتسجل، وجهّز الأصناف الأكتر طلبًا مسبقًا." : "راجع توزيع المناطق، وابعت الأوردرات القريبة من بعض مع نفس الطيار.";
+    const period = r.from === r.to ? new Date(r.from).toLocaleDateString("ar-EG", { weekday: "long", day: "numeric", month: "long" })
+      : `${new Date(r.from).toLocaleDateString("ar-EG", { day: "numeric", month: "short" })} – ${new Date(r.to).toLocaleDateString("ar-EG", { day: "numeric", month: "short", year: "numeric" })} (${r.days} يوم)`;
+    const hrs = []; const hs = r.by_hour.map(h => h.h); for (let h = Math.min(8, ...hs); h <= Math.max(23, ...hs); h++) hrs.push(h);
+    const hm = Object.fromEntries(r.by_hour.map(h => [h.h, h]));
+    const q = RS.search.trim().toLowerCase();
+    const ordersF = q ? r.orders.filter(o => [o.no, o.customer, o.phone, o.area, o.code, o.driver, o.staff, o.cancel_reason].join(" ").toLowerCase().includes(q)) : r.orders;
+    const stLabel = { new: "جديد", ready: "جاهز", out: "مع الطيار", done: "اتسلم", cancel: "اتلغى" };
+
     $("reportBody").innerHTML = `
-      <div class="summary">
-        <div class="tile"><b>${s.total}</b><span>إجمالي الأوردرات</span></div>
-        <div class="tile"><b>${s.done}</b><span>اتسلم</span></div>
-        <div class="tile"><b>${pctOn == null ? "—" : pctOn + "%"}</b><span>في الميعاد</span></div>
-        <div class="tile ${s.cancelled ? "late" : ""}"><b>${pctC}%</b><span>نسبة الإلغاء</span></div>
+      <div class="rep-head"><h2>${period}</h2><span class="hint">مقارنة بـ ${r.days === 1 ? "اليوم اللي قبله" : `الـ ${r.days} يوم اللي قبلها`}</span></div>
+      <div class="kpis">
+        ${tile("الأوردرات", n0(s.total), delta(s.total, p.total, true), s.active ? `${n0(s.active)} لسه شغالين` : "")}
+        ${tile("اتسلم", n0(s.done), delta(s.done, p.done, true))}
+        ${tile("المبيعات", money(s.sales), delta(s.sales, p.sales, true), `متوسط الأوردر ${money(s.avg_order || 0)}`)}
+        ${tile("في الميعاد", onTime == null ? "—" : onTime + "%", delta(onTime, pOnTime, true))}
+        ${tile("نسبة الإلغاء", cRate == null ? "—" : cRate + "%", delta(cRate, pCRate, false), s.cancelled ? `${n0(s.cancelled)} أوردر · ${money(s.lost)} ضاعوا` : "")}
+        ${tile("متوسط وقت التوصيل", fmtMin(s.avg_total), delta(s.avg_total, p.avg_total, false))}
+        ${tile("التوصيل", money(s.fees), delta(s.fees, p.fees, true), `عمولة الطيارين ${money(s.share)}`)}
+        ${tile("العملاء", n0(s.customers), delta(s.customers, p.customers, true), `${pct(s.located, s.total) ?? 0}% بلوكيشن · ${n0(s.edited)} اتعدلوا`)}
       </div>
-      <div class="panel">
-        <h2>الأوردر بيتأخر فين؟</h2>
+
+      ${r.daily.length > 1 ? `<div class="panel"><h2>الأوردرات يوم بيوم</h2>
+        ${bars(r.daily.map(d => ({ v: d.n, c: d.cancelled, l: new Date(d.day).getDate(), tip: `${new Date(d.day).toLocaleDateString("ar-EG", { weekday: "short", day: "numeric", month: "short" })}: ${d.n} أوردر، ${d.cancelled} اتلغى، ${money(d.sales)}` })), { fmt: n0, aria: "عدد الأوردرات في كل يوم" })}
+        <p class="hint legend"><i class="sw a"></i>اتسلم أو شغال <i class="sw c"></i>اتلغى</p></div>
+      <div class="panel"><h2>المبيعات يوم بيوم</h2>
+        ${bars(r.daily.map(d => ({ v: d.sales, l: new Date(d.day).getDate(), tip: `${new Date(d.day).toLocaleDateString("ar-EG", { weekday: "short", day: "numeric", month: "short" })}: ${money(d.sales)}` })), { fmt: v => n0(Math.round(v)), aria: "المبيعات في كل يوم" })}</div>` : ""}
+
+      <div class="panel"><h2>الأوردر بيتأخر فين؟</h2>
         <p class="hint" style="margin:0">متوسط الدقايق في كل مرحلة. متوسط الأوردر كله: ${fmtMin(s.avg_total)}</p>
-        ${total ? `<div class="bar" role="img" aria-label="توزيع وقت التوصيل">${stages.map(x => x[1] ? `<i style="width:${(x[1] / total * 100).toFixed(1)}%;background:${x[2]}"></i>` : "").join("")}</div>` : ""}
+        ${stTotal ? `<div class="bar" role="img" aria-label="توزيع وقت التوصيل">${stages.map(x => x[1] ? `<i style="width:${(x[1] / stTotal * 100).toFixed(1)}%;background:${x[2]}"></i>` : "").join("")}</div>` : ""}
         <div class="stage">${stages.map(x => `<i class="swatch" style="background:${x[2]}"></i><span>${x[0]}</span><b class="num">${fmtMin(x[1])}</b>`).join("")}</div>
-        ${worst && worst[1] ? `<p style="margin:0"><b>أكبر مرحلة: ${worst[0]}.</b> ${advice}</p>` : `<p class="hint" style="margin:0">التحليل هيظهر أول ما الأوردرات تعدي بالمراحل.</p>`}
-      </div>
-      <div class="panel">
-        <h2>الأوردرات حسب الساعة</h2>
-        <div class="hours" role="img" aria-label="عدد الأوردرات في كل ساعة">${hrs.map(h => { const x = hoursMap[h] || { n: 0, cancelled: 0 }; const hn = x.n / maxH * 70, hc = x.cancelled / maxH * 70;
-          return `<div title="${h}:00 — ${x.n} أوردر، ${x.cancelled} اتلغى"><span class="num">${x.n || ""}</span>${hc ? `<i class="c" style="height:${hc}px"></i>` : ""}<i style="height:${Math.max(hn - hc, x.n ? 2 : 0)}px"></i><span class="num">${h % 12 || 12}</span></div>`; }).join("")}</div>
-        <p class="hint" style="margin:0">الأحمر = اتلغى. الساعات اللي فيها أحمر كتير محتاجة طيار زيادة.</p>
-      </div>
-      <div class="panel">
-        <h2>التحصيلات</h2>
-        ${r.collections.length ? `<table><tbody>${r.collections.map(c => `<tr><td>${esc(c.method)}</td><td class="n">${c.n} أوردر</td><td class="n"><b>${money(c.total)}</b></td></tr>`).join("")}
-          <tr><td><b>الإجمالي</b></td><td></td><td class="n"><b>${money(r.collections.reduce((a, c) => a + c.total, 0))}</b></td></tr></tbody></table>` : `<p class="hint" style="margin:0">مفيش تحصيلات في الفترة دي.</p>`}
-        ${(() => { const names = [...new Set(r.collections_by_driver.map(x => x.name))]; const ms = METHODS.filter(m => r.collections_by_driver.some(x => x.method === m));
-          return names.length ? `<div class="tablewrap"><table><thead><tr><th>الطيار</th>${ms.map(m => `<th>${m}</th>`).join("")}</tr></thead><tbody>${names.map(n => `<tr><td>${esc(n)}</td>${ms.map(m => { const x = r.collections_by_driver.find(y => y.name === n && y.method === m); return `<td class="n">${x ? money(x.total) : "—"}</td>`; }).join("")}</tr>`).join("")}</tbody></table></div>` : ""; })()}
-      </div>
-      <div class="panel">
-        <h2>أسباب الإلغاء</h2>
-        ${r.reasons.length ? `<table><tbody>${r.reasons.map(x => `<tr><td>${esc(x.reason)}</td><td class="n">${x.n}</td></tr>`).join("")}</tbody></table>` : `<p class="hint" style="margin:0">مفيش إلغاءات في الفترة دي.</p>`}
-      </div>
-      <div class="panel">
-        <h2>الطيارين</h2>
-        ${r.drivers.length ? `<div class="tablewrap"><table><thead><tr><th>الطيار</th><th>وصّل</th><th>التوصيل</th><th>عمولته</th><th>متوسط الطريق</th><th>متأخر</th></tr></thead><tbody>${r.drivers.map(d => `<tr><td>${esc(d.name)}</td><td class="n">${d.n}</td><td class="n">${money(d.fees)}</td><td class="n">${money(d.share)}</td><td class="n">${fmtMin(d.avg_road)}</td><td class="n">${d.late}</td></tr>`).join("")}</tbody></table></div>` : `<p class="hint" style="margin:0">لسه مفيش توصيلات مكتملة.</p>`}
+        ${worst && worst[1] ? `<p style="margin:0"><b>أكبر مرحلة: ${worst[0]}.</b> ${advice}</p>` : `<p class="hint" style="margin:0">التحليل هيظهر أول ما الأوردرات تعدي بالمراحل.</p>`}</div>
+
+      <div class="panel"><h2>حسب الساعة</h2>
+        ${bars(hrs.map(h => { const x = hm[h] || { n: 0, cancelled: 0 }; return { v: x.n, c: x.cancelled, l: h % 12 || 12, tip: `${h}:00 — ${x.n} أوردر، ${x.cancelled} اتلغى` }; }), { fmt: n0, aria: "عدد الأوردرات في كل ساعة" })}
+        <p class="hint legend"><i class="sw a"></i>أوردرات <i class="sw c"></i>اتلغى. الساعات اللي فيها إلغاء كتير محتاجة طيار زيادة.</p></div>
+      ${r.days >= 7 ? `<div class="panel"><h2>حسب يوم الأسبوع</h2>${table("wd", [{ k: "wd", label: "اليوم", fmt: v => WEEKDAYS[v] }, ...GROUP], r.by_weekday, { sort: { k: "wd", dir: "asc" } })}</div>` : ""}
+
+      <div class="panel wide"><h2>الطيارين</h2>${table("drv", [{ k: "name", label: "الطيار" }, ...GROUP.slice(0, 4),
+        { k: "cancelled_on_road", label: "اتلغى معاه", num: 1, fmt: n0, total: 1 }, { k: "avg_road", label: "متوسط الطريق", num: 1, fmt: v => fmtMin(v) },
+        { k: "fees", label: "التوصيل", num: 1, fmt: mfmt, total: 1 }, { k: "share", label: "عمولته", num: 1, fmt: mfmt, total: 1 },
+        { k: "cash", label: "حصّل نقدي", num: 1, fmt: mfmt, total: 1 }, { k: "sales", label: "إجمالي التحصيل", num: 1, fmt: mfmt, total: 1 }],
+        r.by_driver, { filter: "driver", sort: { k: "done", dir: "desc" }, totals: 1, empty: "لسه مفيش توصيلات." })}</div>
+
+      <div class="panel wide"><h2>المناطق</h2>${table("area", [{ k: "area", label: "المنطقة" }, ...GROUP], r.by_area, { filter: "area", fkey: "area", sort: { k: "n", dir: "desc" }, totals: 1 })}</div>
+      <div class="panel"><h2>طرق الدفع</h2>${table("method", [{ k: "method", label: "الطريقة" }, ...GROUP.slice(0, 3), GROUP[4]], r.by_method, { filter: "method", fkey: "method", sort: { k: "sales", dir: "desc" }, totals: 1 })}</div>
+      <div class="panel"><h2>جه منين</h2>${table("src", [{ k: "source", label: "المصدر" }, ...GROUP.slice(0, 3), GROUP[4]], r.by_source, { filter: "source", fkey: "source", sort: { k: "n", dir: "desc" } })}</div>
+      <div class="panel"><h2>الموظفين</h2>${table("staff", [{ k: "name", label: "سجّله" }, GROUP[0], GROUP[2], { k: "edited", label: "اتعدل", num: 1, fmt: n0 }, GROUP[4]], r.by_staff, { filter: "staff", sort: { k: "n", dir: "desc" } })}</div>
+      <div class="panel"><h2>أسباب الإلغاء</h2>${table("reasons", [{ k: "reason", label: "السبب" }, { k: "n", label: "عدد", num: 1, fmt: n0, total: 1 },
+        { k: "on_road", label: "كان مع الطيار", num: 1, fmt: n0, total: 1 }, { k: "lost", label: "قيمتهم", num: 1, fmt: mfmt, total: 1 }], r.reasons, { sort: { k: "n", dir: "desc" }, totals: 1, empty: "مفيش إلغاءات في الفترة دي." })}</div>
+      <div class="panel wide"><h2>أكتر العملاء طلبًا</h2>${table("cust", [{ k: "name", label: "العميل", fmt: (v, x) => `${esc(v || "بدون اسم")}${x.code ? ` <span class="hint num">كود ${esc(x.code)}</span>` : ""}` }, GROUP[0], GROUP[1], GROUP[2], GROUP[4]],
+        r.top_customers, { filter: "client", sort: { k: "sales", dir: "desc" } })}</div>
+
+      <div class="panel wide">
+        <div class="row spread"><h2>كل الأوردرات <span class="hint">(${n0(ordersF.length)}${r.orders.length >= 4000 ? " · آخر 4000" : ""})</span></h2>
+          <input id="r-search" type="search" placeholder="ابحث في الأوردرات: اسم، رقم، كود، منطقة، طيار…" value="${esc(RS.search)}" style="max-width:320px"></div>
+        ${table("orders", [{ k: "no", label: "#", num: 1 }, { k: "created_at", label: "الوقت", fmt: v => new Date(v).toLocaleString("ar-EG", { day: "numeric", month: "short", hour: "numeric", minute: "2-digit" }) },
+          { k: "customer", label: "العميل", fmt: (v, x) => `${esc(v)}${x.code ? ` <span class="hint num">${esc(x.code)}</span>` : ""}` }, { k: "area", label: "المنطقة", fmt: v => esc(v || "—") },
+          { k: "amount", label: "المبلغ", num: 1, fmt: mfmt, total: 1 }, { k: "fee", label: "التوصيل", num: 1, fmt: mfmt, total: 1 },
+          { k: "method", label: "الدفع", fmt: (v, x) => esc(v || x.payment || "—") }, { k: "status", label: "الحالة", fmt: (v, x) => `<span class="pill st-${v} ${v === "done" && x.minutes > x.promise_min ? "latep" : ""}">${stLabel[v] || v}${v === "done" && x.minutes > x.promise_min ? " · متأخر" : ""}</span>` },
+          { k: "minutes", label: "المدة", num: 1, fmt: v => fmtMin(v) }, { k: "driver", label: "الطيار", fmt: v => esc(v || "—") }, { k: "staff", label: "سجّله", fmt: v => esc(v || "—") }],
+          ordersF.slice(0, RS.shown), { filter: "order", sort: { k: "created_at", dir: "desc" }, totals: 1, empty: "مفيش أوردرات بالفلاتر دي." })}
+        ${ordersF.length > RS.shown ? `<button class="btn" data-act="moreOrders">اعرض ${Math.min(200, ordersF.length - RS.shown)} كمان</button>` : ""}
       </div>`;
   }
+  $("reportBody").addEventListener("input", e => {
+    if (e.target.id !== "r-search") return;
+    RS.search = e.target.value; RS.shown = 100; const pos = e.target.selectionStart;
+    renderReport(); const el = $("r-search"); el.focus(); try { el.setSelectionRange(pos, pos); } catch (x) {}
+  });
+  async function orderDetail(o) {
+    if (o.items === undefined) { try { Object.assign(o, await api(`/api/orders/${o.id}/detail`)); } catch (e) { o.items = ""; o.address = ""; } }
+    const stLabel = { new: "جديد", ready: "جاهز", out: "مع الطيار", done: "اتسلم", cancel: "اتلغى" };
+    sheet(`<div class="row spread"><h2>أوردر #${o.no}</h2><button class="btn small" data-act="closeSheet">قفل</button></div>
+      <div class="sheet-scroll list">
+        <div class="facts">${new Date(o.created_at).toLocaleString("ar-EG")}<span class="sep">·</span>${stLabel[o.status] || o.status}${o.minutes != null ? `<span class="sep">·</span>${fmtMin(o.minutes)}` : ""}</div>
+        <div><b>${esc(o.customer)}</b>${o.code ? ` <span class="hint">كود ${esc(o.code)}</span>` : ""} · <span class="num">${esc(o.phone)}</span></div>
+        <div class="hint">${esc(o.address)}${o.area ? " · " + esc(o.area) : ""}</div>
+        ${o.items ? `<div class="items" style="white-space:pre-wrap">${esc(o.items)}</div>` : ""}
+        <div class="facts">المبلغ ${money(o.amount)}<span class="sep">·</span>منها توصيل ${money(o.fee)}<span class="sep">·</span>${esc(o.method || o.payment)} ${o.collected != null ? money(o.collected) : ""}${o.share != null ? `<span class="sep">·</span>عمولة ${money(o.share)}` : ""}</div>
+        <div class="facts">الطيار: ${esc(o.driver || "—")}<span class="sep">·</span>سجّله: ${esc(o.staff || "—")}<span class="sep">·</span>${esc(o.source || "")}</div>
+        ${o.cancel_reason ? `<div style="color:var(--late)">سبب الإلغاء: ${esc(o.cancel_reason)}</div>` : ""}
+        ${o.edits ? `<button class="btn small" data-act="historyAny" data-id="${o.id}" data-no="${o.no}">اتعدل ${o.edits} مرة: اعرض التعديلات</button>` : ""}
+      </div>`);
+  }
+  function exportReport() {
+    const r = RS.data; if (!r) return;
+    loadXLSX().then(() => {
+      const wb = XLSX.utils.book_new();
+      const add = (name, rows) => { const ws = XLSX.utils.json_to_sheet(rows.length ? rows : [{ "": "مفيش بيانات" }]); ws["!views"] = [{ RTL: true }]; XLSX.utils.book_append_sheet(wb, ws, name); };
+      const s = r.summary;
+      add("الملخص", [["الفترة", `${r.from} إلى ${r.to}`], ["الأوردرات", s.total], ["اتسلم", s.done], ["اتلغى", s.cancelled], ["في الميعاد", s.on_time],
+        ["المبيعات", s.sales], ["متوسط الأوردر", s.avg_order], ["التوصيل", s.fees], ["عمولة الطيارين", s.share], ["قيمة الملغي", s.lost],
+        ["متوسط وقت التوصيل (دقيقة)", s.avg_total], ["متوسط التجهيز", s.avg_prep], ["متوسط انتظار طيار", s.avg_wait], ["متوسط الطريق", s.avg_road], ["عملاء", s.customers]]
+        .map(([k, v]) => ({ "البند": k, "القيمة": v ?? "" })));
+      const stLabel = { new: "جديد", ready: "جاهز", out: "مع الطيار", done: "اتسلم", cancel: "اتلغى" };
+      add("الأوردرات", r.orders.map(o => ({ "رقم": o.no, "اليوم": o.day, "الوقت": new Date(o.created_at).toLocaleTimeString("ar-EG", { hour: "numeric", minute: "2-digit" }),
+        "العميل": o.customer, "كود": o.code || "", "الموبايل": o.phone, "المنطقة": o.area, "المبلغ": o.amount, "منها توصيل": o.fee,
+        "الدفع": o.method || o.payment, "اتحصّل": o.collected ?? "", "عمولة الطيار": o.share ?? "", "الحالة": stLabel[o.status] || o.status, "المدة (دقيقة)": o.minutes ?? "",
+        "وعد التوصيل": o.promise_min, "الطيار": o.driver || "", "سجّله": o.staff || "", "المصدر": o.source, "سبب الإلغاء": o.cancel_reason || "", "عدد التعديلات": o.edits })));
+      const g = (rows, key, label) => rows.map(x => ({ [label]: x[key], "أوردرات": x.n, "اتسلم": x.done, "اتلغى": x.cancelled, "متأخر": x.late, "المبيعات": x.sales, "متوسط الوقت": x.avg_total ?? "" }));
+      add("الطيارين", r.by_driver.map(x => ({ ...g([x], "name", "الطيار")[0], "اتلغى معاه": x.cancelled_on_road, "متوسط الطريق": x.avg_road ?? "", "التوصيل": x.fees, "عمولته": x.share, "حصّل نقدي": x.cash })));
+      add("المناطق", g(r.by_area, "area", "المنطقة"));
+      add("طرق الدفع", g(r.by_method, "method", "الطريقة"));
+      add("الموظفين", g(r.by_staff, "name", "الموظف"));
+      add("أسباب الإلغاء", r.reasons.map(x => ({ "السبب": x.reason, "عدد": x.n, "كان مع الطيار": x.on_road, "قيمتهم": x.lost })));
+      add("أكتر العملاء", r.top_customers.map(x => ({ "العميل": x.name, "كود": x.code || "", "أوردرات": x.n, "اتسلم": x.done, "المبيعات": x.sales })));
+      XLSX.writeFile(wb, `تقرير التوصيل ${r.from}${r.to !== r.from ? " إلى " + r.to : ""}.xlsx`);
+      toast("الملف اتنزل");
+    }).catch(e => toast(e.message));
+  }
+  $("r-export").addEventListener("click", exportReport);
+  $("r-print").addEventListener("click", () => window.print());
+  document.addEventListener("click", e => {
+    const pb = e.target.closest("[data-rpreset]"); if (pb) { RF.preset = pb.dataset.rpreset; if (RF.preset === "custom") { renderReportControls(); $("r-from").focus(); } else loadReport(); return; }
+    const cb = e.target.closest("[data-rclear]"); if (cb) { const k = cb.dataset.rclear; if (k === "all") ["driver", "staff", "method", "area", "source", "status", "client"].forEach(x => (RF[x] = "")); else RF[k] = ""; loadReport(); return; }
+    const sb = e.target.closest("[data-rsort]"); if (sb) { const id = sb.dataset.rsort, k = sb.dataset.k, cur = RS.sort[id];
+      RS.sort[id] = { k, dir: cur && cur.k === k && cur.dir === "desc" ? "asc" : "desc" }; renderReport(); return; }
+    const rf = e.target.closest("[data-rfilter]"); if (rf) {
+      const k = rf.dataset.rfilter, v = rf.dataset.v;
+      if (k === "order") { const o = RS.data.orders.find(x => String(x.id) === v); if (o) orderDetail(o); return; }
+      setFilter(k, v, rf.dataset.label); return; }
+  });
 
   /* ---------- clients ---------- */
   let clientSearchT, openClient = null;
@@ -879,6 +1044,8 @@
           <button class="btn" data-act="closeSheet">رجوع</button>`); break;
       case "doCancel": closeSheet(); if (await act(id, { action: "cancel", reason: a.dataset.reason })) toast("اتلغى"); break;
       case "closeSheet": closeSheet(); break;
+      case "moreOrders": RS.shown += 200; renderReport(); break;
+      case "historyAny": historySheet({ id, no: a.dataset.no }); break;
       case "addRule": {
         const fixed = rulesDraft.filter(r => r.max !== null), last = rulesDraft[rulesDraft.length - 1];
         const next = (fixed.length ? fixed[fixed.length - 1].max : 15) + 5;

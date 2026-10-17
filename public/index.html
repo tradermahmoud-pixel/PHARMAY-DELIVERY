@@ -101,9 +101,17 @@
 
     <!-- Report -->
     <section id="tab-report" class="list" hidden>
-      <div class="panel grid2 dates">
-        <label>من<input type="date" id="r-from"></label>
-        <label>إلى<input type="date" id="r-to"></label>
+      <div class="panel rep-controls">
+        <div class="chips" id="r-presets"></div>
+        <div class="rep-row">
+          <label>من<input type="date" id="r-from"></label>
+          <label>إلى<input type="date" id="r-to"></label>
+        </div>
+        <div class="rep-row" id="r-filters"></div>
+        <div class="row spread">
+          <div class="chips" id="r-active"></div>
+          <div class="row"><button class="btn small" id="r-export" type="button">تصدير Excel</button><button class="btn small" id="r-print" type="button">طباعة</button></div>
+        </div>
       </div>
       <div id="reportBody" class="list"></div>
     </section>

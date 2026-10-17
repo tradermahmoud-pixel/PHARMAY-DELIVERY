@@ -1,6 +1,7 @@
 // Pharmacy delivery — API server
 // Node + Express + Postgres. Serves the mobile web app from /public.
 const express = require("express");
+const compression = require("compression");
 const path = require("path");
 const crypto = require("crypto");
 const { Pool, types } = require("pg");
@@ -441,6 +442,7 @@ function shareFor(fee, rules) {
 /* ---------------- app ---------------- */
 const app = express();
 app.disable("x-powered-by");
+app.use(compression());
 app.set("trust proxy", 1);
 app.use("/api/clients/import", express.json({ limit: "8mb" }));
 app.use(express.json({ limit: "100kb" }));
@@ -715,6 +717,11 @@ app.put("/api/orders/:id", auth, allow("admin", "staff"), wrap(async (req, res) 
   await q(`INSERT INTO order_changes(order_id, user_id, kind, fields, note) VALUES ($1,$2,'edit',$3,$4)`, [id, req.user.id, JSON.stringify(changes), note]);
   const out = await q(`SELECT ${ORDER_COLS} FROM orders o LEFT JOIN users d ON d.id=o.driver_id WHERE o.id=$1`, [id]);
   res.json(out.rows[0]);
+}));
+app.get("/api/orders/:id/detail", auth, allow("admin", "staff"), wrap(async (req, res) => {
+  const o = (await q(`SELECT o.items, o.address, o.location_url, o.lat, o.lng FROM orders o WHERE o.id=$1`, [Number(req.params.id)])).rows[0];
+  if (!o) return res.status(404).json({ error: "الأوردر مش موجود" });
+  res.json(o);
 }));
 app.get("/api/orders/:id/changes", auth, wrap(async (req, res) => {
   const id = Number(req.params.id);
@@ -1171,39 +1178,94 @@ app.get("/api/settlements/:id", auth, staffOnly, wrap(async (req, res) => {
   res.json(rows);
 }));
 
-/* ---- report ---- */
+/* ---- report: one period, any filters, every breakdown ---- */
+function reportWhere(f, from, to) {
+  const params = [from, to]; const P = v => { params.push(v); return "$" + params.length; };
+  const w = [`o.day BETWEEN $1 AND $2`];
+  if (f.driver) w.push(`o.driver_id = ${P(Number(f.driver))}`);
+  if (f.staff) w.push(`o.created_by = ${P(Number(f.staff))}`);
+  if (f.method) w.push(`coalesce(nullif(o.collected_method,''), nullif(o.payment,''), 'غير محدد') = ${P(String(f.method))}`);
+  if (f.area) w.push(f.area === "غير محدد" ? `coalesce(o.area,'') = ''` : `o.area = ${P(String(f.area))}`);
+  if (f.source) w.push(`o.source = ${P(String(f.source))}`);
+  if (f.status === "late") w.push(`o.status='done' AND ${M("o.created_at", "o.delivered_at")} > o.promise_min`);
+  else if (f.status === "active") w.push(`o.status IN ('new','ready','out')`);
+  else if (["done", "cancel"].includes(f.status)) w.push(`o.status = ${P(f.status)}`);
+  if (f.client) w.push(`o.client_id = ${P(Number(f.client))}`);
+  return { where: "WHERE " + w.join(" AND "), params };
+}
+const M = (a, b) => `EXTRACT(EPOCH FROM (${b} - ${a}))/60`;
+const SUMMARY = `count(*)::int AS total,
+  count(*) FILTER (WHERE o.status='done')::int AS done,
+  count(*) FILTER (WHERE o.status='cancel')::int AS cancelled,
+  count(*) FILTER (WHERE o.status IN ('new','ready','out'))::int AS active,
+  count(*) FILTER (WHERE o.status='done' AND ${M("o.created_at", "o.delivered_at")} <= o.promise_min)::int AS on_time,
+  coalesce(sum(o.collected_amount) FILTER (WHERE o.status='done'),0)::float AS sales,
+  coalesce(sum(o.amount) FILTER (WHERE o.status='cancel'),0)::float AS lost,
+  coalesce(sum(o.delivery_fee) FILTER (WHERE o.status='done'),0)::float AS fees,
+  coalesce(sum(o.driver_share) FILTER (WHERE o.status='done'),0)::float AS share,
+  round(avg(o.collected_amount) FILTER (WHERE o.status='done'))::int AS avg_order,
+  round(avg(${M("o.created_at", "o.delivered_at")}) FILTER (WHERE o.status='done'))::int AS avg_total,
+  round(avg(${M("o.created_at", "o.ready_at")}) FILTER (WHERE o.ready_at IS NOT NULL))::int AS avg_prep,
+  round(avg(${M("o.ready_at", "o.out_at")}) FILTER (WHERE o.out_at IS NOT NULL AND o.ready_at IS NOT NULL))::int AS avg_wait,
+  round(avg(${M("o.out_at", "o.delivered_at")}) FILTER (WHERE o.status='done' AND o.out_at IS NOT NULL))::int AS avg_road,
+  count(*) FILTER (WHERE o.edits > 0)::int AS edited,
+  count(*) FILTER (WHERE o.lat IS NOT NULL OR o.location_url IS NOT NULL)::int AS located,
+  count(DISTINCT o.client_id)::int AS customers`;
+const GROUP_COLS = `count(*)::int AS n, count(*) FILTER (WHERE o.status='done')::int AS done,
+  count(*) FILTER (WHERE o.status='cancel')::int AS cancelled,
+  count(*) FILTER (WHERE o.status='done' AND ${M("o.created_at", "o.delivered_at")} > o.promise_min)::int AS late,
+  coalesce(sum(o.collected_amount) FILTER (WHERE o.status='done'),0)::float AS sales,
+  round(avg(${M("o.created_at", "o.delivered_at")}) FILTER (WHERE o.status='done'))::int AS avg_total`;
 app.get("/api/report", auth, allow("admin", "staff"), wrap(async (req, res) => {
   const from = isDay(req.query.from) ? req.query.from : todayCairo();
-  const to = isDay(req.query.to) ? req.query.to : from;
-  const m = (a, b) => `EXTRACT(EPOCH FROM (${b} - ${a}))/60`;
-  const sum = await q(`
-    SELECT count(*)::int AS total,
-      count(*) FILTER (WHERE status='done')::int AS done,
-      count(*) FILTER (WHERE status='cancel')::int AS cancelled,
-      count(*) FILTER (WHERE status='done' AND ${m("created_at", "delivered_at")} <= promise_min)::int AS on_time,
-      round(avg(${m("created_at", "delivered_at")}) FILTER (WHERE status='done'))::int AS avg_total,
-      round(avg(${m("created_at", "ready_at")}) FILTER (WHERE ready_at IS NOT NULL))::int AS avg_prep,
-      round(avg(${m("ready_at", "out_at")}) FILTER (WHERE out_at IS NOT NULL AND ready_at IS NOT NULL))::int AS avg_wait,
-      round(avg(${m("out_at", "delivered_at")}) FILTER (WHERE status='done' AND out_at IS NOT NULL))::int AS avg_road
-    FROM orders WHERE day BETWEEN $1 AND $2`, [from, to]);
-  const reasons = await q(`SELECT coalesce(cancel_reason,'غير محدد') AS reason, count(*)::int AS n FROM orders
-    WHERE day BETWEEN $1 AND $2 AND status='cancel' GROUP BY 1 ORDER BY 2 DESC`, [from, to]);
-  const drivers = await q(`SELECT u.name, count(*)::int AS n, coalesce(sum(o.delivery_fee),0)::float AS fees, coalesce(sum(o.driver_share),0)::float AS share,
-      round(avg(${m("o.out_at", "o.delivered_at")}))::int AS avg_road,
-      count(*) FILTER (WHERE ${m("o.created_at", "o.delivered_at")} > o.promise_min)::int AS late
-    FROM orders o JOIN users u ON u.id=o.driver_id
-    WHERE o.day BETWEEN $1 AND $2 AND o.status='done' GROUP BY u.name ORDER BY n DESC`, [from, to]);
-  const hours = await q(`SELECT EXTRACT(HOUR FROM created_at AT TIME ZONE '${TZ}')::int AS h, count(*)::int AS n,
-      count(*) FILTER (WHERE status='cancel')::int AS cancelled
-    FROM orders WHERE day BETWEEN $1 AND $2 GROUP BY 1 ORDER BY 1`, [from, to]);
-  const collections = await q(`SELECT coalesce(nullif(coalesce(collected_method, payment),''),'غير محدد') AS method, count(*)::int AS n,
-      coalesce(sum(coalesce(collected_amount, amount)),0)::float AS total
-    FROM orders WHERE day BETWEEN $1 AND $2 AND status='done' GROUP BY 1 ORDER BY total DESC`, [from, to]);
-  const byDriver = await q(`SELECT u.name, coalesce(nullif(coalesce(o.collected_method, o.payment),''),'غير محدد') AS method, coalesce(sum(coalesce(o.collected_amount, o.amount)),0)::float AS total
-    FROM orders o JOIN users u ON u.id=o.driver_id
-    WHERE o.day BETWEEN $1 AND $2 AND o.status='done' GROUP BY 1,2`, [from, to]);
-  res.json({ from, to, summary: sum.rows[0], reasons: reasons.rows, drivers: drivers.rows, hours: hours.rows,
-    collections: collections.rows, collections_by_driver: byDriver.rows });
+  let to = isDay(req.query.to) ? req.query.to : from;
+  if (to < from) to = from;
+  const f = req.query;
+  const { where, params } = reportWhere(f, from, to);
+  const days = Math.round((Date.parse(to) - Date.parse(from)) / 86400000) + 1;
+  const pTo = new Date(Date.parse(from) - 86400000).toISOString().slice(0, 10);
+  const pFrom = new Date(Date.parse(from) - days * 86400000).toISOString().slice(0, 10);
+  const prevW = reportWhere(f, pFrom, pTo);
+  const run = (sql, p = params) => q(sql, p).then(r => r.rows);
+  const FROM = `FROM orders o LEFT JOIN users d ON d.id=o.driver_id LEFT JOIN users s ON s.id=o.created_by LEFT JOIN clients c ON c.id=o.client_id ${where}`;
+  const [summary, prev, daily, byDriver, byArea, byHour, byWeekday, byMethod, bySource, byStaff, reasons, topCustomers, orders, options] = await Promise.all([
+    run(`SELECT ${SUMMARY} FROM orders o ${where}`).then(r => r[0]),
+    run(`SELECT ${SUMMARY} FROM orders o ${prevW.where}`, prevW.params).then(r => r[0]),
+    days <= 120 ? run(`SELECT to_char(g.d,'YYYY-MM-DD') AS day, coalesce(x.n,0) AS n, coalesce(x.done,0) AS done, coalesce(x.cancelled,0) AS cancelled, coalesce(x.sales,0) AS sales
+      FROM generate_series($1::date, $2::date, '1 day') g(d) LEFT JOIN (SELECT o.day, ${GROUP_COLS} FROM orders o ${where} GROUP BY o.day) x ON x.day = g.d::date ORDER BY g.d`) : [],
+    run(`SELECT d.id, d.name, ${GROUP_COLS},
+        count(*) FILTER (WHERE o.status='cancel' AND o.out_at IS NOT NULL)::int AS cancelled_on_road,
+        round(avg(${M("o.out_at", "o.delivered_at")}) FILTER (WHERE o.status='done'))::int AS avg_road,
+        coalesce(sum(o.delivery_fee) FILTER (WHERE o.status='done'),0)::float AS fees,
+        coalesce(sum(o.driver_share) FILTER (WHERE o.status='done'),0)::float AS share,
+        coalesce(sum(o.collected_amount) FILTER (WHERE o.status='done' AND o.collected_method='نقدي'),0)::float AS cash
+      FROM orders o JOIN users d ON d.id=o.driver_id ${where} GROUP BY d.id, d.name ORDER BY done DESC`),
+    run(`SELECT coalesce(nullif(o.area,''),'غير محدد') AS area, ${GROUP_COLS} FROM orders o ${where} GROUP BY 1 ORDER BY n DESC LIMIT 40`),
+    run(`SELECT EXTRACT(HOUR FROM o.created_at AT TIME ZONE '${TZ}')::int AS h, ${GROUP_COLS} FROM orders o ${where} GROUP BY 1 ORDER BY 1`),
+    run(`SELECT EXTRACT(ISODOW FROM o.day)::int AS wd, ${GROUP_COLS} FROM orders o ${where} GROUP BY 1 ORDER BY 1`),
+    run(`SELECT coalesce(nullif(o.collected_method,''), nullif(o.payment,''), 'غير محدد') AS method, ${GROUP_COLS} FROM orders o ${where} GROUP BY 1 ORDER BY sales DESC`),
+    run(`SELECT coalesce(nullif(o.source,''),'غير محدد') AS source, ${GROUP_COLS} FROM orders o ${where} GROUP BY 1 ORDER BY n DESC`),
+    run(`SELECT s.id, s.name, ${GROUP_COLS}, count(*) FILTER (WHERE o.edits>0)::int AS edited
+      FROM orders o JOIN users s ON s.id=o.created_by ${where} GROUP BY s.id, s.name ORDER BY n DESC`),
+    run(`SELECT coalesce(o.cancel_reason,'غير محدد') AS reason, count(*)::int AS n, coalesce(sum(o.amount),0)::float AS lost,
+        count(*) FILTER (WHERE o.out_at IS NOT NULL)::int AS on_road FROM orders o ${where} AND o.status='cancel' GROUP BY 1 ORDER BY n DESC`),
+    run(`SELECT c.id, coalesce(nullif(c.name,''), max(o.customer)) AS name, c.code, ${GROUP_COLS}
+      FROM orders o JOIN clients c ON c.id=o.client_id ${where} GROUP BY c.id ORDER BY sales DESC, n DESC LIMIT 20`),
+    run(`SELECT o.id, o.no, o.day, o.created_at, o.customer, o.phone, o.area, c.code, o.amount::float AS amount, o.delivery_fee::float AS fee,
+        o.payment, o.collected_method AS method, o.collected_amount::float AS collected, o.driver_share::float AS share, o.status, o.source,
+        d.name AS driver, s.name AS staff, o.cancel_reason, o.edits, o.promise_min,
+        round(${M("o.created_at", "coalesce(o.delivered_at, o.cancelled_at)")})::int AS minutes
+      ${FROM} ORDER BY o.created_at DESC LIMIT 4000`),
+    run(`SELECT
+        (SELECT json_agg(x ORDER BY x) FROM (SELECT DISTINCT coalesce(nullif(o.area,''),'غير محدد') AS x FROM orders o WHERE o.day BETWEEN $1 AND $2) a) AS areas,
+        (SELECT json_agg(x ORDER BY x) FROM (SELECT DISTINCT coalesce(nullif(o.collected_method,''), nullif(o.payment,''), 'غير محدد') AS x FROM orders o WHERE o.day BETWEEN $1 AND $2) m) AS methods,
+        (SELECT json_agg(x ORDER BY x) FROM (SELECT DISTINCT o.source AS x FROM orders o WHERE o.day BETWEEN $1 AND $2 AND o.source <> '') s) AS sources`, [from, to]).then(r => r[0]),
+  ]);
+  const people = (await q(`SELECT id, name, role FROM users ORDER BY name`)).rows;
+  res.json({ from, to, days, prev_from: pFrom, prev_to: pTo, summary, prev, daily, by_driver: byDriver, by_area: byArea, by_hour: byHour,
+    by_weekday: byWeekday, by_method: byMethod, by_source: bySource, by_staff: byStaff, reasons, top_customers: topCustomers, orders,
+    options: { areas: options.areas || [], methods: options.methods || [], sources: options.sources || [],
+      drivers: people.filter(u => u.role === "driver"), staff: people.filter(u => u.role !== "driver") } });
 }));
 
 /* ---- static app ---- */
