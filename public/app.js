@@ -476,11 +476,11 @@
       const r = await api("/api/clients?q=" + encodeURIComponent($("c-search").value.trim()));
       $("c-total").textContent = `${r.total.toLocaleString("ar-EG")} عميل متسجل` + ($("c-search").value.trim() ? ` · ${r.clients.length} نتيجة` : " · آخر اللي اتعاملوا");
       $("clientList").innerHTML = r.clients.length ? r.clients.map(c => `<button class="card client-row" data-act="openClient" data-id="${c.id}">
-          <div class="top"><b>${esc(c.name || "بدون اسم")}</b>${c.code ? `<span class="hint num">كود ${esc(c.code)}</span>` : ""}</div>
+          <div class="top"><b>${esc(c.name || "بدون اسم")}</b><span>${c.code ? `<span class="hint num">كود ${esc(c.code)}</span>` : ""}${oldCode(c, $("c-search").value)}</span></div>
           <div class="hint num">${(c.phones || []).map(esc).join(" / ") || "مفيش رقم"}</div>
           <div class="meta">${c.area ? `<span class="pill area">${esc(c.area)}</span>` : ""}${c.status ? `<span class="pill ${statusClass(c.status)}">${esc(c.status)}</span>` : ""}
             <span>${c.n_addresses} عنوان</span>${c.n_addresses ? `·<span>${c.n_located} بلوكيشن</span>` : ""}${c.last_purchase ? `·<span>آخر شراء ${fmtDate(c.last_purchase)}</span>` : ""}</div></button>`).join("")
-        : `<div class="empty">${$("c-search").value.trim() ? "مفيش عميل بالبحث ده" : "لسه مفيش عملاء. هيتسجلوا لوحدهم مع الأوردرات، أو استورد الليستة من تحت."}</div>`;
+        : `<div class="empty">${$("c-search").value.trim() ? (/^[\d٠-٩]{1,6}$/.test($("c-search").value.trim()) ? `مفيش عميل بالكود ${esc($("c-search").value.trim())}، ولا رقم موبايل بينتهي بيه` : "مفيش عميل بالبحث ده") : "لسه مفيش عملاء. هيتسجلوا لوحدهم مع الأوردرات، أو استورد الليستة من تحت."}</div>`;
     } catch (e) { toast(e.message); }
   }
   $("c-search").addEventListener("input", () => { clearTimeout(clientSearchT); clientSearchT = setTimeout(loadClients, 300); });
@@ -525,11 +525,12 @@
   /* ---------- import ---------- */
   const ROLE_LABELS = { skip: "تجاهل", code: "كود العميل", name: "الاسم", phone: "تليفون", address: "عنوان", area: "المنطقة", location: "لوكيشن",
     label: "اسم العنوان", fee: "رسوم التوصيل", branch: "الفرع", invoices: "عدد الفواتير", first_purchase: "أول شراء", last_purchase: "آخر شراء",
-    spend: "مشتريات السنة", status: "حالة العميل", notes: "ملاحظات" };
+    spend: "مشتريات السنة", status: "حالة العميل", notes: "ملاحظات", merged: "أكواد قديمة مدموجة" };
   function guessRole(h) {
     const t = String(h || "").toLowerCase().trim();
     if (!t) return "skip";
-    if (/(كما في البرنامج|مدموج|الشبكة|network|carrier)/.test(t)) return "skip";
+    if (/(مدموج|merged)/.test(t)) return "merged";
+    if (/(كما في البرنامج|الشبكة|network|carrier)/.test(t)) return "skip";
     if (/(كود التوصيل|رسوم التوصيل|مصاريف التوصيل|سعر التوصيل|delivery)/.test(t)) return "fee";
     if (/(كود|code|^id$|رقم العميل)/.test(t)) return "code";
     if (/(فواتير|فاتورة|invoices)/.test(t)) return "invoices";
@@ -591,7 +592,8 @@
       return { code: txt("code")[0] || null, name: txt("name").join(" "), phones: txt("phone"), area: txt("area")[0] || "",
         addresses: Array.from({ length: n }, (_, i) => ({ address: addrs[i] || "", location: locs[i] || "", label: labels[i] || "" })),
         delivery_fee: one("fee"), branch: txt("branch")[0] || "", invoices: one("invoices"), first_purchase: one("first_purchase"),
-        last_purchase: one("last_purchase"), spend_12m: one("spend"), status: txt("status")[0] || "", notes: txt("notes").join(" - ") };
+        last_purchase: one("last_purchase"), spend_12m: one("spend"), status: txt("status")[0] || "", notes: txt("notes").join(" - "),
+        merged_codes: txt("merged").join(" ") };
     });
   }
   function renderImportMap() {
@@ -1063,11 +1065,14 @@
   }
   $("f-amount").addEventListener("input", updateTotal);
   $("f-fee").addEventListener("input", () => { $("f-fee").dataset.auto = ""; updateTotal(); });
+  // when a customer was found by an old (merged) code, say so
+  const oldCode = (c, t) => { const d = String(t || "").replace(/[٠-٩]/g, x => "٠١٢٣٤٥٦٧٨٩".indexOf(x)).trim();
+    return /^\d{1,6}$/.test(d) && c.code !== d && (" " + (c.alt_codes || "") + " ").includes(" " + d + " ") ? ` <span class="pill warnp">كود قديم ${esc(d)}</span>` : ""; };
   const fmtDate = v => (v ? new Date(v).toLocaleDateString("ar-EG", { day: "numeric", month: "short", year: "numeric" }) : "—");
   function statusClass(st) { return /نشط/.test(st) ? "okp" : /خامل|لم يشتر/.test(st) ? "warnp" : ""; }
   function clientFacts(c) {
     const bits = [];
-    if (c.code) bits.push(`كود <b class="num">${esc(c.code)}</b>`);
+    if (c.code) bits.push(`كود <b class="num">${esc(c.code)}</b>${c.alt_codes ? ` <span class="hint">(أكواد قديمة: ${esc(c.alt_codes.split(" ").join("، "))})</span>` : ""}`);
     if (c.status) bits.push(`<span class="pill ${statusClass(c.status)}">${esc(c.status)}</span>`);
     if (c.last_purchase) bits.push(`آخر شراء ${fmtDate(c.last_purchase)}`);
     if (c.invoices) bits.push(`${c.invoices} فاتورة`);
@@ -1085,10 +1090,10 @@
         const r = await api("/api/clients?q=" + encodeURIComponent(t));
         if ($("f-search").value.trim() !== t) return;
         $("f-results").innerHTML = r.clients.length ? r.clients.slice(0, 8).map(c => `<button type="button" class="res" data-act="pickClient" data-id="${c.id}">
-            <span class="res-top"><b>${esc(c.name || "بدون اسم")}</b>${c.code ? `<span class="hint num">كود ${esc(c.code)}</span>` : ""}</span>
+            <span class="res-top"><b>${esc(c.name || "بدون اسم")}</b>${c.code ? `<span class="hint num">كود ${esc(c.code)}</span>` : ""}${oldCode(c, t)}</span>
             <span class="hint num">${(c.phones || []).map(esc).join(" / ")}</span>
             ${c.area ? `<span class="hint">${esc(c.area)}</span>` : ""}</button>`).join("")
-          : `<div class="hint" style="padding:10px">مفيش عميل بالبحث ده. اكتب بياناته تحت وهيتسجل عميل جديد.</div>`;
+          : `<div class="hint" style="padding:10px">${/^[\d٠-٩]{1,6}$/.test(t) ? `مفيش عميل بالكود ${esc(t)}.` : "مفيش عميل بالبحث ده."} اكتب بياناته تحت وهيتسجل عميل جديد.</div>`;
         $("f-results").hidden = false;
       } catch (e) {}
     }, 250);

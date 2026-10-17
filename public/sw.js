@@ -1,5 +1,5 @@
 // App-shell cache so the app opens fast and installs on the phone. API calls always go to the network.
-const CACHE = "pd-v7";
+const CACHE = "pd-v8";
 const SHELL = ["/", "/index.html", "/styles.css", "/app.js", "/manifest.json", "/icon-192.png", "/icon-512.png", "/locate.html", "/track.html"];
 self.addEventListener("install", e => { e.waitUntil(caches.open(CACHE).then(c => c.addAll(SHELL))); self.skipWaiting(); });
 self.addEventListener("activate", e => {

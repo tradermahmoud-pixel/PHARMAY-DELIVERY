@@ -158,6 +158,8 @@ async function migrate() {
         '[^0-9a-zء-ي ]+', ' ', 'g'), ' +', ' ', 'g'))
     $f$;
     ALTER TABLE clients ADD COLUMN IF NOT EXISTS search TEXT;
+    -- old codes that were merged into this customer in the pharmacy system, stored as " 8893 9676 "
+    ALTER TABLE clients ADD COLUMN IF NOT EXISTS alt_codes TEXT NOT NULL DEFAULT '';
     -- edits after an order is placed (items added/removed, price changes), with history
     ALTER TABLE orders ADD COLUMN IF NOT EXISTS edits INT NOT NULL DEFAULT 0;
     ALTER TABLE orders ADD COLUMN IF NOT EXISTS edited_at TIMESTAMPTZ;
@@ -337,7 +339,7 @@ function normAr(t) {
     .replace(/[^0-9a-zء-ي ]+/g, " ").replace(/\s+/g, " ").trim();
 }
 
-const CLIENT_COLS = `id, name, notes, orders_count, code, area, delivery_fee::float AS delivery_fee, branch, invoices,
+const CLIENT_COLS = `id, name, notes, orders_count, code, trim(alt_codes) AS alt_codes, area, delivery_fee::float AS delivery_fee, branch, invoices,
   first_purchase, last_purchase, spend_12m::float AS spend_12m, status`;
 async function clientById(id) {
   const c = (await q(`SELECT ${CLIENT_COLS} FROM clients WHERE id=$1`, [id])).rows[0];
@@ -731,26 +733,33 @@ app.get("/api/clients", auth, staffOnly, wrap(async (req, res) => {
   const term = String(req.query.q || "").trim().slice(0, 80);
   const words = normAr(term).split(" ").filter(Boolean).slice(0, 6);
   const digits = term.replace(/[٠-٩]/g, d => "٠١٢٣٤٥٦٧٨٩".indexOf(d)).replace(/\D/g, "");
+  const onlyDigits = !!digits && /^[\d٠-٩\s+()-]+$/.test(term);
   const params = []; const P = v => { params.push(v); return "$" + params.length; };
+  const codeHit = d => { const a = P(d), b = P("% " + d + " %"); return `(c.code = ${a} OR c.alt_codes LIKE ${b})`; };
   let where = "", rank = "";
   if (term) {
     const conds = [];
-    // every word must appear somewhere (name, area, code or an address), in any order
-    if (words.length) conds.push("(" + words.map(w => `c.search LIKE ${P("%" + w + "%")}`).join(" AND ") + ")");
-    if (digits.length >= 3) conds.push(`c.code = ${P(digits)}`);
-    // phone: typed with or without the leading 0, spaces or dashes
-    const looksPhone = digits.length >= 4 && digits.length >= term.replace(/\s|-/g, "").length - 1;
-    if (looksPhone) conds.push(`EXISTS (SELECT 1 FROM client_phones p WHERE p.client_id=c.id AND p.phone LIKE ${P("%" + normPhone(digits).replace(/^0/, "") + "%")})`);
+    if (onlyDigits && digits.length <= 6) {
+      // a short number: the customer code (current or an old merged one), or the last digits of a phone
+      conds.push(codeHit(digits));
+      if (digits.length >= 4) conds.push(`EXISTS (SELECT 1 FROM client_phones p WHERE p.client_id=c.id AND p.phone LIKE ${P("%" + digits)})`);
+      rank = `(c.code = ${P(digits)}) DESC, (c.alt_codes LIKE ${P("% " + digits + " %")}) DESC,`;
+    } else if (onlyDigits) {
+      // a phone number, typed with or without the leading 0, spaces or dashes
+      conds.push(`EXISTS (SELECT 1 FROM client_phones p WHERE p.client_id=c.id AND p.phone LIKE ${P("%" + normPhone(digits).replace(/^0/, "") + "%")})`);
+    } else {
+      // words: every word must appear somewhere (name, area, code or an address), in any order
+      if (words.length) conds.push("(" + words.map(w => `c.search LIKE ${P("%" + w + "%")}`).join(" AND ") + ")");
+      const nameAll = words.length ? words.map(w => `norm_ar(c.name) LIKE ${P("%" + w + "%")}`).join(" AND ") : "false";
+      rank = `(${nameAll}) DESC, ${words.length ? `(norm_ar(c.name) LIKE ${P(words[0] + "%")}) DESC,` : ""}`;
+    }
     if (!conds.length) return res.json({ total: (await q(`SELECT count(*)::int AS n FROM clients`)).rows[0].n, clients: [] });
     where = "WHERE " + conds.join(" OR ");
-    const nameAll = words.length ? words.map(w => `norm_ar(c.name) LIKE ${P("%" + w + "%")}`).join(" AND ") : "false";
-    rank = `${digits.length >= 3 ? `(c.code = ${P(digits)}) DESC,` : ""} (${nameAll}) DESC,
-      ${words.length ? `(norm_ar(c.name) LIKE ${P(words[0] + "%")}) DESC,` : ""}`;
   }
   const { rows } = await q(`WITH hit AS (
       SELECT c.id FROM clients c ${where}
       ORDER BY ${rank} c.last_purchase DESC NULLS LAST, c.updated_at DESC LIMIT 40)
-    SELECT c.id, c.name, c.code, c.area, c.status, c.last_purchase, c.invoices, c.orders_count, c.delivery_fee::float AS delivery_fee,
+    SELECT c.id, c.name, c.code, trim(c.alt_codes) AS alt_codes, c.area, c.status, c.last_purchase, c.invoices, c.orders_count, c.delivery_fee::float AS delivery_fee,
       (SELECT array_agg(phone ORDER BY phone) FROM client_phones p WHERE p.client_id=c.id) AS phones,
       (SELECT count(*)::int FROM client_addresses a WHERE a.client_id=c.id) AS n_addresses,
       (SELECT count(*)::int FROM client_addresses a WHERE a.client_id=c.id AND (a.lat IS NOT NULL OR a.location_url IS NOT NULL)) AS n_located
@@ -847,6 +856,7 @@ app.post("/api/clients/import", auth, allow("admin"), wrap(async (req, res) => {
   const rows = [];
   for (const r of input) {
     const code = String(r.code ?? "").trim().replace(/\.0+$/, "").slice(0, 40) || null;
+    const merged = String(r.merged_codes ?? "").replace(/[٠-٩]/g, d => "٠١٢٣٤٥٦٧٨٩".indexOf(d)).split(/[^0-9]+/).filter(x => x && x !== code).slice(0, 30);
     const phones = [...new Set((r.phones || []).flatMap(splitPhones))].slice(0, 10);
     const name = String(r.name || "").trim().slice(0, 120);
     if (!code && !phones.length) { st.skipped++; continue; }
@@ -854,7 +864,7 @@ app.post("/api/clients/import", auth, allow("admin"), wrap(async (req, res) => {
     const addresses = (r.addresses || []).flatMap(a => String(a.address || "").split("|").map((t, j) => ({
         address: t.trim().slice(0, 300), label: j ? "" : String(a.label || "").trim().slice(0, 40), location: j ? "" : String(a.location || "").trim() })))
       .filter(a => a.address || a.location).slice(0, 10);
-    rows.push({ code, phones, name, area, addresses,
+    rows.push({ code, merged, phones, name, area, addresses,
       fee: num(r.delivery_fee), branch: String(r.branch || "").trim().slice(0, 40), invoices: Math.round(num(r.invoices, 0)),
       first: toDate(r.first_purchase), last: toDate(r.last_purchase), spend: num(r.spend_12m, 0), status: String(r.status || "").trim().slice(0, 40),
       notes: String(r.notes || "").trim().slice(0, 500) });
@@ -902,7 +912,8 @@ app.post("/api/clients/import", auth, allow("admin"), wrap(async (req, res) => {
       const pick = f => { for (const r of g.rows) if (r[f] !== null && r[f] !== "" && r[f] !== undefined) return r[f]; return null; };
       return { name: pick("name") || "", code: pick("code"), area: pick("area") || "", fee: pick("fee"), branch: pick("branch") || "",
         invoices: Math.max(0, ...g.rows.map(r => r.invoices || 0)), first: pick("first"), last: pick("last"),
-        spend: Math.max(0, ...g.rows.map(r => r.spend || 0)), status: pick("status") || "", notes: g.rows.map(r => r.notes).filter(Boolean).join(" - ") };
+        spend: Math.max(0, ...g.rows.map(r => r.spend || 0)), status: pick("status") || "", notes: g.rows.map(r => r.notes).filter(Boolean).join(" - "),
+        alt: (() => { const m = [...new Set(g.rows.flatMap(r => r.merged))]; return m.length ? " " + m.join(" ") + " " : ""; })() };
     };
     const H = groups.map(head);
     const col = f => H.map(h => h[f]);
@@ -912,10 +923,10 @@ app.post("/api/clients/import", auth, allow("admin"), wrap(async (req, res) => {
     if (fresh.length) {
       const idx = groups.map((g, i) => i).filter(i => fresh.includes(groups[i]));
       const sel = arr => idx.map(i => arr[i]);
-      await cq(`INSERT INTO clients(id, name, code, area, delivery_fee, branch, invoices, first_purchase, last_purchase, spend_12m, status, notes)
-        SELECT * FROM unnest($1::int[], $2::text[], $3::text[], $4::text[], $5::numeric[], $6::text[], $7::int[], $8::timestamptz[], $9::timestamptz[], $10::numeric[], $11::text[], $12::text[])`,
+      await cq(`INSERT INTO clients(id, name, code, area, delivery_fee, branch, invoices, first_purchase, last_purchase, spend_12m, status, notes, alt_codes)
+        SELECT * FROM unnest($1::int[], $2::text[], $3::text[], $4::text[], $5::numeric[], $6::text[], $7::int[], $8::timestamptz[], $9::timestamptz[], $10::numeric[], $11::text[], $12::text[], $13::text[])`,
         [sel(groups.map(g => g.id)), sel(col("name")), sel(codeFor), sel(col("area")), sel(col("fee")), sel(col("branch")), sel(col("invoices")),
-         sel(col("first")), sel(col("last")), sel(col("spend")), sel(col("status")), sel(col("notes"))]);
+         sel(col("first")), sel(col("last")), sel(col("spend")), sel(col("status")), sel(col("notes")), sel(col("alt"))]);
     }
     const old = groups.map((g, i) => i).filter(i => !fresh.includes(groups[i]));
     if (old.length) {
@@ -932,12 +943,13 @@ app.post("/api/clients/import", auth, allow("admin"), wrap(async (req, res) => {
           spend_12m = v.spend,
           status = COALESCE(NULLIF(v.status, ''), c.status),
           notes = CASE WHEN c.notes = '' THEN v.notes ELSE c.notes END,
+          alt_codes = CASE WHEN v.alt = '' THEN c.alt_codes ELSE v.alt END,
           updated_at = now()
-        FROM unnest($1::int[], $2::text[], $3::text[], $4::text[], $5::numeric[], $6::text[], $7::int[], $8::timestamptz[], $9::timestamptz[], $10::numeric[], $11::text[], $12::text[])
-          AS v(id, name, code, area, fee, branch, invoices, first, last, spend, status, notes)
+        FROM unnest($1::int[], $2::text[], $3::text[], $4::text[], $5::numeric[], $6::text[], $7::int[], $8::timestamptz[], $9::timestamptz[], $10::numeric[], $11::text[], $12::text[], $13::text[])
+          AS v(id, name, code, area, fee, branch, invoices, first, last, spend, status, notes, alt)
         WHERE c.id = v.id`,
         [sel(groups.map(g => g.id)), sel(col("name")), sel(codeFor), sel(col("area")), sel(col("fee")), sel(col("branch")), sel(col("invoices")),
-         sel(col("first")), sel(col("last")), sel(col("spend")), sel(col("status")), sel(col("notes"))]);
+         sel(col("first")), sel(col("last")), sel(col("spend")), sel(col("status")), sel(col("notes")), sel(col("alt"))]);
     }
     // 5) phones
     const pPhone = [], pId = [];
