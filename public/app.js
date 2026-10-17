@@ -51,7 +51,17 @@
     document.title = S.shop.name;
   }
   async function loadShop() { try { S.shop = await api("/api/public/settings"); applyShop(); } catch (e) {} }
+  async function loadShopPrivate() {
+    try { const st = await api("/api/settings"); S.shop.driver_client = st.driver_client; $("s-driverclient").checked = !!st.driver_client; } catch (e) {}
+  }
+  $("s-driverclient").addEventListener("change", async e => {
+    const on = e.target.checked;
+    try { await api("/api/settings", { method: "PUT", body: { driver_client: on } }); S.shop.driver_client = on;
+      toast(on ? "الطيارين هيشوفوا كل أرقام وعناوين العميل" : "الطيارين هيشوفوا رقم وعنوان الأوردر بس"); }
+    catch (err) { e.target.checked = !on; toast(err.message); }
+  });
   function renderShopForm() {
+    loadShopPrivate();
     $("s-name").value = S.shop.name;
     $("s-loc").value = "";
     $("s-loc").placeholder = S.shop.lat != null ? `محفوظ: ${S.shop.lat.toFixed(5)}, ${S.shop.lng.toFixed(5)} · الصق لينك جديد للتغيير` : "الصق لينك جوجل ماب للصيدلية";
@@ -365,6 +375,7 @@
         <button class="btn small" data-act="history" data-id="${o.id}">إيه اللي اتغير</button></div>` : ""}
       ${o.status === "cancel" && driverMode && o.out_at ? `<div class="edited-alert bad"><b>الأوردر ده اتلغى وهو معاك.</b> رجّعه للصيدلية.</div>` : ""}
       ${o.items ? `<div class="items">${esc(o.items)}</div>` : ""}
+      ${driverMode && o.client_info ? clientInfoBlock(o) : ""}
       <div class="meta num">
         ${o.area ? `<span class="pill area">${esc(o.area)}</span>` : ""}
         <span>${esc(o.source)}</span>·<span>${Number(o.amount) ? money(o.amount) : "—"}${Number(o.delivery_fee) ? ` <span class="hint">(منها توصيل ${money(o.delivery_fee)})</span>` : ""}</span>·<span class="pill pay">${esc(o.collected_method || o.payment)}${o.status === "done" && o.collected_amount != null ? " " + money(o.collected_amount) : ""}</span>·<span>اتسجل ${clock(o.created_at)}</span>
@@ -960,6 +971,21 @@
     try { navigator.clipboard.writeText(text).then(() => toast("اتنسخ"), fallback); } catch (e) { fallback(); }
   }
 
+  // all of the customer's numbers and saved addresses, for the driver (when the manager allows it)
+  function clientInfoBlock(o) {
+    const ci = o.client_info, digits = String(o.phone || "").replace(/\D/g, "");
+    const others = ci.phones.filter(p => p !== digits);
+    const addrs = ci.addresses.filter(a => a.id !== o.address_id && (a.address || a.lat != null || a.location_url));
+    if (!others.length && !addrs.length) return "";
+    const tel = p => { const intl = p.startsWith("0") ? "2" + p : p;
+      return `<div class="ci-row"><span class="num">${esc(p)}</span><span class="row"><a class="btn small" href="tel:${esc(p)}">اتصال</a><a class="btn small" href="https://wa.me/${intl}" target="_blank" rel="noopener">واتساب</a></span></div>`; };
+    const adr = a => { const loc = a.lat != null ? `https://www.google.com/maps/dir/?api=1&destination=${a.lat},${a.lng}` : a.location_url;
+      return `<div class="ci-row"><span>${a.label ? `<b>${esc(a.label)}</b> · ` : ""}${esc(a.address || "لوكيشن بس")}${a.area ? ` <span class="pill area">${esc(a.area)}</span>` : ""}</span>
+        ${loc ? `<a class="btn small" href="${esc(loc)}" target="_blank" rel="noopener">الخريطة</a>` : ""}</div>`; };
+    return `<details class="ci"><summary>أرقام وعناوين تانية للعميل <span class="hint">(${others.length ? others.length + " رقم" : ""}${others.length && addrs.length ? " · " : ""}${addrs.length ? addrs.length + " عنوان" : ""})</span></summary>
+      ${others.length ? `<div class="ci-h">الأرقام</div>${others.map(tel).join("")}` : ""}
+      ${addrs.length ? `<div class="ci-h">العناوين التانية</div>${addrs.map(adr).join("")}` : ""}</details>`;
+  }
   const editedOnRoad = o => !!(o.edited_at && o.out_at && ts(o.edited_at) > ts(o.out_at));
   const FIELD_LABEL = { items: "الطلب", amount: "المبلغ", delivery_fee: "منها توصيل", payment: "طريقة الدفع", promise_min: "وعد التوصيل", address: "العنوان" };
   const EDIT_NOTES = ["العميل زوّد أصناف", "العميل لغى صنف", "صنف مش متوفر", "تغيير الكمية", "تصحيح"];

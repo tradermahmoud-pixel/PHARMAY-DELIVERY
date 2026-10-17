@@ -256,3 +256,18 @@ button.pill.editp{color:var(--warn);border-color:var(--warn);cursor:pointer;font
   .tabs,.topbar .btn,.rep-controls .chips#r-presets,.rep-controls .rep-row,#r-export,#r-print,#summary,#toastHost,#sheetHost,#r-search,[data-act=moreOrders]{display:none!important}
   body{background:#fff;color:#000} .panel,.tile{break-inside:avoid;border-color:#ccc} .wrap{max-width:none}
 }
+/* driver: customer's other numbers and addresses */
+.ci{border:1px solid var(--line);border-radius:10px;padding:8px 10px;background:var(--bg)}
+.ci summary{cursor:pointer;font-weight:600;font-size:.9rem}
+.ci-h{font-size:.75rem;color:var(--muted);margin-top:8px}
+.ci-row{display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap;padding:6px 0;border-bottom:1px solid var(--line);font-size:.9rem}
+.ci-row:last-child{border-bottom:0}
+/* on/off switch */
+.switch-row{display:flex;gap:12px;align-items:flex-start;border-top:1px solid var(--line);padding-top:12px}
+.switch{position:relative;flex:0 0 auto;width:46px;height:26px;margin-top:2px}
+.switch input{position:absolute;opacity:0;width:100%;height:100%;margin:0;cursor:pointer;z-index:1}
+.switch span{position:absolute;inset:0;background:var(--line);border-radius:999px;transition:background .2s}
+.switch span::after{content:"";position:absolute;top:3px;inset-inline-start:3px;width:20px;height:20px;border-radius:50%;background:#fff;box-shadow:0 1px 3px rgba(0,0,0,.3);transition:transform .2s}
+.switch input:checked + span{background:var(--accent)}
+.switch input:checked + span::after{transform:translateX(-20px)}
+.switch input:focus-visible + span{outline:2px solid var(--accent);outline-offset:2px}

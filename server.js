@@ -405,7 +405,7 @@ const toDate = v => { if (!v) return null; const d = new Date(v); return isNaN(d
 async function getSettings() {
   const rows = (await q(`SELECT key, value FROM settings`)).rows;
   const m = Object.fromEntries(rows.map(r => [r.key, r.value]));
-  return { name: m.name || "توصيل الصيدلية", lat: num(m.lat), lng: num(m.lng) };
+  return { name: m.name || "توصيل الصيدلية", lat: num(m.lat), lng: num(m.lng), driver_client: m.driver_client === "1" };
 }
 async function setSetting(key, value) {
   await q(`INSERT INTO settings(key, value) VALUES ($1,$2) ON CONFLICT (key) DO UPDATE SET value=EXCLUDED.value`, [key, value == null ? "" : String(value)]);
@@ -482,7 +482,8 @@ app.post("/api/logout", auth, wrap(async (req, res) => {
 
 app.get("/api/me", auth, (req, res) => res.json({ user: req.user, today: todayCairo() }));
 
-app.get("/api/public/settings", wrap(async (req, res) => res.json(await getSettings())));
+app.get("/api/public/settings", wrap(async (req, res) => { const st = await getSettings(); delete st.driver_client; res.json(st); }));
+app.get("/api/settings", auth, wrap(async (req, res) => res.json(await getSettings())));
 app.put("/api/settings", auth, allow("admin"), wrap(async (req, res) => {
   const b = req.body || {};
   if (b.name !== undefined) {
@@ -490,6 +491,7 @@ app.put("/api/settings", auth, allow("admin"), wrap(async (req, res) => {
     if (!name) return res.status(400).json({ error: "اكتب اسم الصيدلية" });
     await setSetting("name", name);
   }
+  if (typeof b.driver_client === "boolean") await setSetting("driver_client", b.driver_client ? "1" : "0");
   if (b.lat !== undefined && b.lng !== undefined) {
     const lat = num(b.lat), lng = num(b.lng);
     if (lat === null || lng === null || Math.abs(lat) > 90 || Math.abs(lng) > 180) return res.status(400).json({ error: "الموقع مش واضح" });
@@ -553,6 +555,17 @@ app.get("/api/orders", auth, wrap(async (req, res) => {
   if (req.user.role === "driver") { extra = ` AND (o.driver_id=$2 OR (o.status='ready' AND o.driver_id IS NULL))`; params.push(req.user.id); }
   const { rows } = await q(
     `SELECT ${ORDER_COLS} FROM orders o LEFT JOIN users d ON d.id=o.driver_id WHERE o.day=$1${extra} ORDER BY o.no`, params);
+  if (req.user.role === "driver" && (await getSettings()).driver_client) {
+    const mine = rows.filter(o => o.driver_id === req.user.id && ["ready", "out"].includes(o.status) && o.client_id);
+    const ids = [...new Set(mine.map(o => o.client_id))];
+    if (ids.length) {
+      const ph = (await q(`SELECT client_id, phone FROM client_phones WHERE client_id = ANY($1) ORDER BY phone`, [ids])).rows;
+      const ad = (await q(`SELECT id, client_id, label, address, area, lat, lng, location_url FROM client_addresses WHERE client_id = ANY($1)
+        ORDER BY last_used_at DESC NULLS LAST, id DESC`, [ids])).rows;
+      for (const o of mine) o.client_info = { phones: ph.filter(x => x.client_id === o.client_id).map(x => x.phone),
+        addresses: ad.filter(x => x.client_id === o.client_id).map(({ client_id, ...a }) => a) };
+    }
+  }
   let drivers_live = [];
   if (req.user.role !== "driver") drivers_live = (await q(`SELECT id, last_lat AS lat, last_lng AS lng, last_at AS at FROM users
     WHERE role='driver' AND active AND last_at > now() - interval '12 hours'`)).rows;

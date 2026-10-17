@@ -150,6 +150,11 @@
         <label>موقع الصيدلية على الخريطة<input id="s-loc" placeholder="الصق لينك جوجل ماب للصيدلية"></label>
         <div class="row"><button class="btn primary" type="submit">حفظ</button><button class="btn" type="button" id="s-here">أنا في الصيدلية: استخدم موقعي الحالي</button></div>
         <p class="hint" id="s-status" style="margin:0"></p>
+        <div class="switch-row">
+          <label class="switch"><input type="checkbox" id="s-driverclient"><span></span></label>
+          <div><b>الطيار يشوف كل أرقام وعناوين العميل</b>
+            <div class="hint">لما يكون شغال، الطيار بيشوف على الأوردرات اللي معاه كل أرقام العميل وكل عناوينه المحفوظة، عشان لو الرقم الأساسي مش بيرد أو العنوان مش واضح. بتختفي أول ما الأوردر يتسلم.</div></div>
+        </div>
       </form>
       <div id="userList" class="list"></div>
       <form id="userForm" class="panel" autocomplete="off">
