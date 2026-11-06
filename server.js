@@ -1281,6 +1281,14 @@ app.get("/api/report", auth, allow("admin", "staff"), wrap(async (req, res) => {
       drivers: people.filter(u => u.role === "driver"), staff: people.filter(u => u.role !== "driver") } });
 }));
 
+/* ---- pharmacy ERP (صيدلية الجزار), mounted under /erp — isolated schema, failure-contained ---- */
+try {
+  app.use("/erp", require("./erp"));
+  console.log("ERP mounted at /erp");
+} catch (e) {
+  console.error("ERP mount failed (delivery unaffected):", e && e.message);
+}
+
 /* ---- static app ---- */
 app.use("/vendor/xlsx", express.static(path.join(__dirname, "node_modules", "xlsx", "dist"), { maxAge: "30d" }));
 app.use("/vendor/leaflet", express.static(path.join(__dirname, "node_modules", "leaflet", "dist"), { maxAge: "30d" }));

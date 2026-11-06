@@ -1,0 +1,14 @@
+{
+  "name": "صيدلية الجزار",
+  "short_name": "الجزار",
+  "lang": "ar",
+  "dir": "rtl",
+  "start_url": "/erp/",
+  "scope": "/erp/",
+  "display": "standalone",
+  "background_color": "#0A2420",
+  "theme_color": "#0A2420",
+  "icons": [
+    { "src": "/erp/icon.svg", "type": "image/svg+xml", "sizes": "any", "purpose": "any" }
+  ]
+}
