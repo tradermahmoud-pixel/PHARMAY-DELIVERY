@@ -201,6 +201,47 @@ app.post('/api/users', auth, async (req, res) => {
   } catch (e) { res.status(400).json({ error: 'الاسم مستخدم بالفعل' }); }
 });
 
+/* ---- Genius mirror ingest (token-protected bulk upsert; no DB exposure) ---- */
+app.post('/api/ingest', async (req, res) => {
+  const tok = process.env.ERP_SYNC_TOKEN;
+  if (!tok || req.get('X-Sync-Token') !== tok) return res.status(403).json({ error: 'forbidden' });
+  const col = String((req.body && req.body.collection) || '');
+  if (!col) return res.status(400).json({ error: 'collection required' });
+  const docs = Array.isArray(req.body.docs) ? req.body.docs : [];
+  const client = await pool.connect();
+  let changed = 0, deleted = 0;
+  try {
+    await client.query(`SET search_path TO "${SCHEMA}"`);
+    await client.query('BEGIN');
+    for (const d of docs) {
+      const id = String((d && d.id) || '');
+      if (!id) continue;
+      const r = await client.query(
+        `INSERT INTO docs(col,id,data,deleted,seq,updated_at,updated_by)
+           VALUES($1,$2,$3,false,nextval('doc_seq'),$4,'genius')
+         ON CONFLICT (col,id) DO UPDATE SET data=EXCLUDED.data, deleted=false,
+           seq=nextval('doc_seq'), updated_at=$4, updated_by='genius'
+         WHERE docs.data IS DISTINCT FROM EXCLUDED.data OR docs.deleted`,
+        [col, id, d.data || {}, now()]);
+      if (r.rowCount > 0) changed++;
+    }
+    // optional: soft-delete Genius-sourced docs in this collection that are no longer present
+    if (req.body.purge && Array.isArray(req.body.keepIds)) {
+      const keep = req.body.keepIds.map(String);
+      const r = await client.query(
+        `UPDATE docs SET deleted=true, seq=nextval('doc_seq'), updated_at=$2, updated_by='genius'
+         WHERE col=$1 AND updated_by='genius' AND NOT deleted AND id <> ALL($3::text[])`,
+        [col, now(), keep]);
+      deleted = r.rowCount;
+    }
+    await client.query('COMMIT');
+    res.json({ ok: true, collection: col, received: docs.length, changed, deleted });
+  } catch (e) {
+    await client.query('ROLLBACK').catch(() => {});
+    res.status(500).json({ error: 'ingest', detail: e.message });
+  } finally { client.release(); }
+});
+
 /* static + pages (served under the mount, e.g. /erp/...) */
 const pub = path.join(__dirname, 'public');
 app.use(express.static(pub, { index: false, maxAge: '1h' }));
