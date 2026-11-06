@@ -239,6 +239,7 @@ const IC={
   profit:'<path d="M3 17l6-6 4 4 7-7M14 8h7v7"/>',
   warn:'<path d="M12 3l9 16H3zM12 10v4M12 17h.01"/>',
   chk:'<path d="M20 6L9 17l-5-5"/>',
+  bill:'<path d="M6 2h12v20l-3-2-3 2-3-2-3 2zM9 7h6M9 11h6M9 15h4"/>',
 };
 const icon=(k,w)=>`<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" ${w?`width=${w} height=${w}`:''}>${IC[k]||''}</svg>`;
 
@@ -264,6 +265,7 @@ const del  =(c,id)=>DB.collection(c).doc(id).delete();
 const ROUTES=[
   {k:'dash',  t:'لوحة التحكم', i:'dash',  sec:'الرئيسية'},
   {k:'pos',   t:'نقطة البيع',  i:'pos'},
+  {k:'invoices', t:'الفواتير', i:'bill'},
   {k:'items', t:'الأصناف والمخزون', i:'box', sec:'المخزن'},
   {k:'purch', t:'المشتريات',  i:'cart'},
   {k:'cust',  t:'العملاء',    i:'users', sec:'الحسابات'},
@@ -326,7 +328,7 @@ function render(){
   const r=ROUTES.find(x=>x.k===route)||ROUTES[0];
   $('#title').textContent=r.t;
   const v=$('#view');
-  ({dash:vDash,pos:vPOS,items:vItems,purch:vPurch,cust:vCust,vend:vVend,cash:vCash,emp:vEmp,usr:vUsr}[route]||vDash)(v);
+  ({dash:vDash,pos:vPOS,invoices:vInvoices,items:vItems,purch:vPurch,cust:vCust,vend:vVend,cash:vCash,emp:vEmp,usr:vUsr}[route]||vDash)(v);
 }
 
 /* ---------- Dashboard ---------- */
@@ -528,6 +530,67 @@ function printReceipt(s){
   <p style="text-align:center;margin-top:10px">شكراً لزيارتكم 🌿</p>
   <script>print();setTimeout(()=>close(),300)<\/script></body></html>`);
   w.document.close();
+}
+
+/* ---------- Invoices (الفواتير) ---------- */
+let invQ='', invRange='30';
+function invFiltered(){
+  let l=arr('sales').slice();
+  if(invRange!=='all'){const from=dayStart((+invRange||1)-1);l=l.filter(s=>(s.ts||0)>=from)}
+  const q=invQ.trim().toLowerCase();
+  if(q)l=l.filter(s=>String(s.no||'').includes(q)||(s.customer||'').toLowerCase().includes(q));
+  return l.sort((a,b)=>(b.ts||0)-(a.ts||0));
+}
+function vInvoices(v){
+  const l=invFiltered();
+  const tot=l.reduce((s,x)=>s+(+x.total||0),0);
+  v.innerHTML=`
+  <div class="sbar">
+    <div class="search">${icon('search')}<input id="q" placeholder="بحث برقم الفاتورة أو اسم العميل…" value="${esc(invQ)}"></div>
+    <div class="seg" style="max-width:380px">
+      ${[['1','اليوم'],['7','٧ أيام'],['30','٣٠ يوم'],['all','الكل']].map(o=>`<button class="${invRange===o[0]?'on':''}" onclick="invRange='${o[0]}';render()">${o[1]}</button>`).join('')}
+    </div>
+  </div>
+  <div class="card" style="padding:12px 18px;margin-bottom:14px;display:flex;gap:28px;flex-wrap:wrap">
+    <div><div style="font-size:12px;color:var(--muted)">عدد الفواتير</div><div style="font:700 21px/1.1 'IBM Plex Sans Arabic'">${num(l.length)}</div></div>
+    <div><div style="font-size:12px;color:var(--muted)">إجمالي المبيعات</div><div style="font:700 21px/1.1 'IBM Plex Sans Arabic';color:var(--brand)">${moneyp(tot)}</div></div>
+  </div>
+  <div class="card"><div class="tbl-wrap"><table class="tbl">
+    <thead><tr><th>#</th><th>التاريخ والوقت</th><th>العميل</th><th>أصناف</th><th>الخصم</th><th>الإجمالي</th><th>الدفع</th></tr></thead>
+    <tbody>${l.length?l.slice(0,500).map(s=>`<tr style="cursor:pointer" onclick="invShow('${s.id}')">
+      <td class="num" style="font-weight:600">${esc(s.no||'')}</td>
+      <td style="white-space:nowrap;font-size:13px">${dtm(s.ts)||dmy(s.date)}</td>
+      <td>${esc(s.customer||'—')}</td>
+      <td class="num">${(s.lines||[]).length}</td>
+      <td class="num">${+s.discount?moneyp(s.discount):'—'}</td>
+      <td class="num"><b>${moneyp(s.total)}</b></td>
+      <td>${s.pay==='credit'?'<span class="pill w">آجل</span>':'<span class="pill g">نقدي</span>'}</td>
+    </tr>`).join(''):`<tr><td colspan=7><div class="empty">${icon('bill',44)}<div>لا توجد فواتير في الفترة المختارة</div></div></td></tr>`}</tbody>
+  </table></div></div>
+  ${l.length>500?`<p style="color:var(--muted);font-size:12px;margin-top:10px">يعرض أحدث ٥٠٠ فاتورة — ضيّق الفترة أو ابحث للوصول للباقي.</p>`:''}`;
+  const qi=$('#q');if(qi)qi.oninput=e=>{invQ=e.target.value;clearTimeout(rT);rT=setTimeout(render,150)};
+}
+function invShow(id){
+  const s=get('sales',id);if(!s)return;
+  const lines=(s.lines||[]);
+  const sub=s.subtotal!=null?+s.subtotal:lines.reduce((a,l)=>a+(+l.price||0)*(+l.qty||0),0);
+  modal(`فاتورة #${esc(s.no||'')}`,`
+    <div style="display:flex;gap:18px;flex-wrap:wrap;margin-bottom:14px;color:var(--muted);font-size:13.5px">
+      <div>التاريخ: <b style="color:var(--ink)">${dtm(s.ts)||dmy(s.date)}</b></div>
+      <div>العميل: <b style="color:var(--ink)">${esc(s.customer||'—')}</b></div>
+      <div>الدفع: <b style="color:var(--ink)">${s.pay==='credit'?'آجل':'نقدي'}</b></div>
+      ${s.user?`<div>الكاشير: <b style="color:var(--ink)">${esc(s.user)}</b></div>`:''}
+    </div>
+    <div class="tbl-wrap" style="max-height:320px"><table class="tbl">
+      <thead><tr><th>الصنف</th><th>كمية</th><th>السعر</th><th>الإجمالي</th></tr></thead>
+      <tbody>${lines.length?lines.map(l=>`<tr><td>${esc(l.name||'')}</td><td class="num">${num(l.qty)}</td><td class="num">${moneyp(l.price)}</td><td class="num"><b>${moneyp((+l.price||0)*(+l.qty||0))}</b></td></tr>`).join(''):`<tr><td colspan=4 style="text-align:center;color:var(--muted);padding:18px">لا تفاصيل أصناف لهذه الفاتورة</td></tr>`}</tbody>
+    </table></div>
+    <div class="sum" style="margin-top:12px">
+      <div class="ln"><span>الإجمالي الفرعي</span><b>${moneyp(sub)}</b></div>
+      ${+s.discount?`<div class="ln"><span>خصم</span><b>${moneyp(s.discount)}</b></div>`:''}
+      <div class="ln tot"><span>الإجمالي</span><span>${moneyp(s.total)}</span></div>
+    </div>
+  `,'طباعة',()=>{printReceipt(s)},'lg');
 }
 
 /* ---------- Purchases ---------- */
