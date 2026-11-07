@@ -171,7 +171,7 @@ app.get('/api/sales-summary', auth, async (_req, res) => {
        FROM docs d
        LEFT JOIN LATERAL (
          SELECT SUM(((l->>'price')::numeric - COALESCE((l->>'cost')::numeric,0)) * (l->>'qty')::numeric) AS p
-         FROM jsonb_array_elements(d.data->'lines') l
+         FROM jsonb_array_elements(CASE WHEN jsonb_typeof(d.data->'lines')='array' THEN d.data->'lines' ELSE '[]'::jsonb END) l
        ) li ON true
        WHERE d.col='sales' AND NOT d.deleted
          AND d.data->>'date' >= to_char((now() AT TIME ZONE 'Africa/Cairo')::date - 34, 'YYYY-MM-DD')
@@ -180,7 +180,7 @@ app.get('/api/sales-summary', auth, async (_req, res) => {
       `SELECT l->>'name' AS name,
               SUM((l->>'qty')::numeric) AS qty,
               SUM((l->>'price')::numeric*(l->>'qty')::numeric) AS val
-       FROM docs d, jsonb_array_elements(d.data->'lines') l
+       FROM docs d, jsonb_array_elements(CASE WHEN jsonb_typeof(d.data->'lines')='array' THEN d.data->'lines' ELSE '[]'::jsonb END) l
        WHERE d.col='sales' AND NOT d.deleted
          AND d.data->>'date' >= to_char((now() AT TIME ZONE 'Africa/Cairo')::date - 30, 'YYYY-MM-DD')
        GROUP BY name ORDER BY val DESC NULLS LAST LIMIT 6`);
