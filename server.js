@@ -448,6 +448,7 @@ app.use(compression());
 app.set("trust proxy", 1);
 app.use("/api/clients/import", express.json({ limit: "8mb" }));
 app.use("/erp/api/ingest", express.json({ limit: "6mb" }));
+app.use("/api/ingest-genius", express.json({ limit: "6mb" }));
 app.use(express.json({ limit: "100kb" }));
 app.use((req, res, next) => { res.set("X-Content-Type-Options", "nosniff"); next(); });
 
