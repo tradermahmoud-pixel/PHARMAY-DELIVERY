@@ -245,7 +245,7 @@ const icon=(k,w)=>`<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" st
 
 /* ============================= data layer ============================= */
 let DB,USER,ME;
-const COLS=['items','purchases','customers','vendors','cash','employees','attendance','settings'];
+const COLS=['purchases','customers','vendors','cash','employees','attendance','settings'];
 const state={}; COLS.forEach(c=>state[c]={});
 const arr=c=>Object.values(state[c]||{});
 const get=(c,id)=>state[c]&&state[c][id];
@@ -333,14 +333,16 @@ function render(){
 }
 
 /* ---------- Dashboard ---------- */
-let salesSummary=null, summaryAt=0, summaryLoading=false;
+let salesSummary=null, stockSum=null, summaryAt=0, summaryLoading=false;
 function isoLocal(off){const d=new Date();d.setDate(d.getDate()-(off||0));return d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0')}
 function refreshSummary(force){
   if(summaryLoading)return; if(!force && Date.now()-summaryAt<15000)return;
-  summaryLoading=true;
-  fetch((window.__BASE__||'')+'/api/sales-summary',{credentials:'same-origin'})
-    .then(r=>r.ok?r.json():null).then(j=>{if(j){salesSummary=j;summaryAt=Date.now();if(route==='dash'){const vv=$('#view');if(vv)vDash(vv);}}})
-    .catch(()=>{}).finally(()=>{summaryLoading=false});
+  summaryLoading=true;const B=(window.__BASE__||'');
+  Promise.all([
+    fetch(B+'/api/sales-summary',{credentials:'same-origin'}).then(r=>r.ok?r.json():null).catch(()=>null),
+    fetch(B+'/api/stock-summary',{credentials:'same-origin'}).then(r=>r.ok?r.json():null).catch(()=>null)
+  ]).then(([s,st])=>{if(s)salesSummary=s;if(st)stockSum=st;summaryAt=Date.now();if(route==='dash'){const vv=$('#view');if(vv)vDash(vv);}})
+    .finally(()=>{summaryLoading=false});
 }
 function vDash(v){
   refreshSummary();
@@ -349,7 +351,8 @@ function vDash(v){
   const dz={sales:0,profit:0,n:0};
   const today=byDate[isoLocal(0)]||dz, yest=byDate[isoLocal(1)]||dz;
   const tSales=today.sales, tProfit=today.profit;
-  const low=lowItems();
+  const SS=stockSum||{items:0,stock_value:0,low_count:0,low:[]};
+  const low=SS.low||[];
   const days=[];for(let i=13;i>=0;i--){const r=byDate[isoLocal(i)]||dz;days.push({d:dayStart(i),v:r.sales,n:r.n})}
   const mx=Math.max(1,...days.map(d=>d.v));
   let mSales=0,mProfit=0;const m0=isoLocal(29);(S.daily||[]).forEach(r=>{if(r.day>=m0){mSales+=+r.sales||0;mProfit+=+r.profit||0}});
@@ -360,8 +363,8 @@ function vDash(v){
     <div class="kpi accent"><div class="t">${icon('pos')} مبيعات اليوم</div><div class="v">${money(tSales)}</div><div class="s">${today.n} فاتورة · أمس ${moneyp(yest.sales)}</div></div>
     <div class="kpi"><div class="t">${icon('profit')} ربح اليوم</div><div class="v">${money(tProfit)}</div><div class="s">هامش ${tSales?Math.round(tProfit/tSales*100):0}%</div></div>
     <div class="kpi"><div class="t">${icon('cash')} رصيد الخزنة</div><div class="v">${money(cashBalance())}</div><div class="s">صافي النقدية</div></div>
-    <div class="kpi"><div class="t">${icon('box')} قيمة المخزون</div><div class="v">${money(stockValue())}</div><div class="s">${arr('items').length} صنف</div></div>
-    <div class="kpi"><div class="t">${icon('warn')} أصناف تحت الحد</div><div class="v" style="color:${low.length?'var(--danger)':'var(--ok)'}">${num(low.length)}</div><div class="s">تحتاج إعادة طلب</div></div>
+    <div class="kpi"><div class="t">${icon('box')} قيمة المخزون</div><div class="v">${money(SS.stock_value)}</div><div class="s">${num(SS.items)} صنف</div></div>
+    <div class="kpi"><div class="t">${icon('warn')} أصناف تحت الحد</div><div class="v" style="color:${SS.low_count?'var(--danger)':'var(--ok)'}">${num(SS.low_count)}</div><div class="s">تحتاج إعادة طلب</div></div>
     <div class="kpi"><div class="t">${icon('users')} ديون العملاء</div><div class="v">${money(custDebt())}</div><div class="s">مستحق لنا</div></div>
     <div class="kpi"><div class="t">${icon('truck')} مديونية الموردين</div><div class="v">${money(vendDebt())}</div><div class="s">مستحق علينا</div></div>
     <div class="kpi"><div class="t">${icon('pos')} مبيعات الشهر</div><div class="v">${money(mSales)}</div><div class="s">ربح ${moneyp(mProfit)}</div></div>
@@ -385,37 +388,48 @@ function vDash(v){
   `;
 }
 
-/* ---------- Items / Inventory ---------- */
-let itemQ='';
+/* ---------- Items / Inventory (بحث خادمي ذكي على كل الأصناف) ---------- */
+let itemQ='', itemsData=[], itemsLoading=false, itemLow=false;
+function serialOf(i){return i.serial||String(i.id||'').replace(/^gen_/,'')}
+function itemById(id){return itemsData.find(x=>x.id===id)}
+function loadItems(){
+  itemsLoading=true;renderItemRows();
+  const u=(window.__BASE__||'')+'/api/items?limit=300&low='+(itemLow?'1':'0')+'&q='+encodeURIComponent(itemQ.trim());
+  fetch(u,{credentials:'same-origin'}).then(r=>r.ok?r.json():[]).then(j=>{itemsData=Array.isArray(j)?j:[];})
+    .catch(()=>{itemsData=[];}).finally(()=>{itemsLoading=false;renderItemRows();});
+}
+function renderItemRows(){
+  const tb=$('#itembody');if(!tb)return;const list=itemsData;
+  tb.innerHTML=list.length?list.map(i=>{const st=itemStock(i),lowf=(+i.min||0)>0&&st<=+i.min;return `<tr>
+    <td class="num" style="font-weight:700;color:var(--brand)">${esc(serialOf(i))}</td>
+    <td><div style="font-weight:600">${esc(i.name)}</div>${i.unit?`<div style="font-size:11.5px;color:var(--muted)">${esc(i.unit)}</div>`:''}</td>
+    <td>${i.category?`<span class="pill n">${esc(i.category)}</span>`:'—'}</td>
+    <td class="num" dir="ltr" style="text-align:right;font-size:12.5px;color:var(--muted)">${esc(i.barcode||'—')}</td>
+    <td class="num"><b>${moneyp(i.sell)}</b></td>
+    <td class="num">${lowf?`<span class="pill r">${num(st)}</span>`:num(st)}</td>
+    <td><div class="act"><button class="ib" onclick="itemEdit('${i.id}')" title="تعديل">${icon('edit')}</button><button class="ib dng" onclick="itemDel('${i.id}')" title="حذف">${icon('trash')}</button></div></td>
+  </tr>`}).join(''):`<tr><td colspan=7><div class="empty">${icon('box',44)}<div>${itemsLoading?'بحمّل…':(itemQ.trim()?'لا نتائج':'ابحث عن صنف بالاسم أو الباركود أو المسلسل')}</div></div></td></tr>`;
+}
 function vItems(v){
-  const q=itemQ.toLowerCase();
-  let list=arr('items').sort((a,b)=>(a.name||'').localeCompare(b.name||'','ar'));
-  if(q)list=list.filter(i=>(i.name||'').toLowerCase().includes(q)||(i.barcode||'').includes(q)||(i.category||'').toLowerCase().includes(q));
   v.innerHTML=`
   <div class="sbar">
-    <div class="search">${icon('search')}<input id="q" placeholder="بحث بالاسم أو الباركود أو التصنيف…" value="${esc(itemQ)}"></div>
+    <div class="search">${icon('search')}<input id="q" placeholder="بحث بالاسم أو الباركود أو المسلسل… (ذكي ومرن)" value="${esc(itemQ)}"></div>
+    <div class="seg" style="max-width:200px"><button id="allb" class="${!itemLow?'on':''}">الكل</button><button id="lowb" class="${itemLow?'on':''}">تحت الحد</button></div>
     <button class="btn pri" onclick="itemEdit()">${icon('plus')} صنف جديد</button>
   </div>
   <div class="card"><div class="tbl-wrap"><table class="tbl">
-    <thead><tr><th>الصنف</th><th>التصنيف</th><th>الباركود</th><th>شراء</th><th>بيع</th><th>المتاح</th><th>الصلاحية</th><th></th></tr></thead>
-    <tbody>${list.length?list.map(i=>{
-      const st=itemStock(i),lowf=(+i.min||0)>0&&st<=+i.min;
-      const exp=i.expiry&&new Date(i.expiry)<new Date(Date.now()+60*864e5);
-      return `<tr>
-        <td><div style="font-weight:600">${esc(i.name)}</div>${i.unit?`<div style="font-size:11.5px;color:var(--muted)">${esc(i.unit)}</div>`:''}</td>
-        <td>${i.category?`<span class="pill n">${esc(i.category)}</span>`:'—'}</td>
-        <td class="num" style="font-size:12.5px;color:var(--muted)">${esc(i.barcode||'—')}</td>
-        <td class="num">${moneyp(i.buy)}</td>
-        <td class="num"><b>${moneyp(i.sell)}</b></td>
-        <td class="num">${lowf?`<span class="pill r">${num(st)}</span>`:num(st)}</td>
-        <td class="num">${i.expiry?`<span class="pill ${exp?'w':'n'}">${dmy(i.expiry)}</span>`:'—'}</td>
-        <td><div class="act"><button class="ib" onclick="itemEdit('${i.id}')" title="تعديل">${icon('edit')}</button><button class="ib dng" onclick="itemDel('${i.id}')" title="حذف">${icon('trash')}</button></div></td>
-      </tr>`}).join(''):`<tr><td colspan=8><div class="empty">${icon('box',44)}<div>لا توجد أصناف — ابدأ بإضافة صنف</div></div></td></tr>`}</tbody>
-  </table></div></div>`;
-  const qi=$('#q');if(qi)qi.oninput=e=>{itemQ=e.target.value;clearTimeout(rT);rT=setTimeout(()=>vItems(v),120)};
+    <thead><tr><th>مسلسل</th><th>الصنف</th><th>التصنيف</th><th>الباركود</th><th>بيع</th><th>المتاح</th><th></th></tr></thead>
+    <tbody id="itembody"></tbody>
+  </table></div></div>
+  <p style="color:var(--muted);font-size:12px;margin-top:10px">بحث ذكي على كل الأصناف في السيرفر (يتجاهل الهمزات والتشكيل وترتيب الكلمات) · حتى ٣٠٠ نتيجة</p>`;
+  renderItemRows();loadItems();
+  const qi=$('#q');if(qi)qi.oninput=e=>{itemQ=e.target.value;clearTimeout(rT);rT=setTimeout(loadItems,300)};
+  const ab=$('#allb'),lb=$('#lowb');
+  if(ab)ab.onclick=()=>{itemLow=false;ab.classList.add('on');lb.classList.remove('on');loadItems()};
+  if(lb)lb.onclick=()=>{itemLow=true;lb.classList.add('on');ab.classList.remove('on');loadItems()};
 }
 function itemEdit(id){
-  const it=id?get('items',id):{};
+  const it=id?(itemById(id)||{}):{};
   const cats=['دواء','مستحضر تجميل','مكمل غذائي','مستلزمات طبية','عناية','أخرى'];
   modal(id?'تعديل صنف':'صنف جديد',`
     <label class="fld"><span>اسم الصنف *</span><input id="f_name" value="${esc(it.name||'')}"></label>
@@ -443,16 +457,25 @@ function itemEdit(id){
     closeModal();toast('تم الحفظ','ok');
   });
 }
-function itemDel(id){const it=get('items',id);confirmDel(`حذف «${esc(it.name)}»؟`,()=>{del('items',id);toast('تم الحذف','ok')})}
+function itemDel(id){const it=itemById(id)||{};confirmDel(`حذف «${esc(it.name||'')}»؟`,()=>{del('items',id);toast('تم الحذف','ok')})}
 
 /* ---------- POS ---------- */
-let cart=[], posQ='', payType='cash', posCust='';
+let cart=[], posQ='', payType='cash', posCust='', posResults=[], posSearching=false;
+function posItemById(id){return posResults.find(x=>x.id===id)}
 function posAdd(id){
-  const it=get('items',id);if(!it)return;
-  if(itemStock(it)<=0){toast('الصنف غير متاح في المخزون','err')}
+  const it=posItemById(id);if(!it)return;
+  if(itemStock(it)<=0)toast('الصنف غير متاح في المخزون','err');
   const ex=cart.find(c=>c.item===id);
-  if(ex)ex.qty++;else cart.push({item:id,name:it.name,price:+it.sell||0,cost:+it.buy||0,qty:1});
+  if(ex)ex.qty++;else cart.push({item:id,name:it.name,serial:serialOf(it),price:+it.sell||0,cost:+it.buy||0,qty:1});
   renderPOS();
+}
+function loadPosSearch(){
+  const q=posQ.trim();
+  if(!q){posResults=[];renderResults();return;}
+  posSearching=true;renderResults();
+  fetch((window.__BASE__||'')+'/api/items-search?q='+encodeURIComponent(q)+'&limit=50',{credentials:'same-origin'})
+    .then(r=>r.ok?r.json():[]).then(j=>{posResults=Array.isArray(j)?j:[];})
+    .catch(()=>{posResults=[];}).finally(()=>{posSearching=false;renderResults();});
 }
 function posQty(id,d){const c=cart.find(x=>x.item===id);if(!c)return;c.qty=Math.max(1,(+c.qty||1)+d);renderPOS()}
 function posSet(id,val){const c=cart.find(x=>x.item===id);if(!c)return;c.qty=Math.max(0,+val||0);if(c.qty===0)cart=cart.filter(x=>x.item!==id);renderPOS()}
@@ -471,16 +494,18 @@ function vPOS(v){
     </div>
   </div>`;
   const pq=$('#pq');
-  pq.oninput=e=>{posQ=e.target.value;renderResults()};
-  pq.onkeydown=e=>{if(e.key==='Enter'){const bc=posQ.trim();const it=arr('items').find(i=>i.barcode&&i.barcode===bc);if(it){posAdd(it.id);posQ='';pq.value='';renderResults()}else{const l=filterItems();if(l.length===1){posAdd(l[0].id);posQ='';pq.value='';renderResults()}}}};
+  pq.oninput=e=>{posQ=e.target.value;clearTimeout(rT);rT=setTimeout(loadPosSearch,250)};
+  pq.onkeydown=e=>{if(e.key==='Enter'){e.preventDefault();const q=posQ.trim();if(!q)return;
+    fetch((window.__BASE__||'')+'/api/items-search?q='+encodeURIComponent(q)+'&limit=8',{credentials:'same-origin'})
+      .then(r=>r.ok?r.json():[]).then(l=>{if(l&&l.length){posResults=l;const hit=l.find(i=>i.barcode===q||i.serial===q)||l[0];posAdd(hit.id);posQ='';pq.value='';posResults=[];renderResults();pq.focus();}}).catch(()=>{});
+  }};
   setTimeout(()=>pq.focus(),50);
-  renderPOS();
+  renderResults();renderPOS();
 }
-function filterItems(){const q=posQ.toLowerCase().trim();let l=arr('items');if(q)l=l.filter(i=>(i.name||'').toLowerCase().includes(q)||(i.barcode||'').includes(q));return l.sort((a,b)=>itemStock(b)-itemStock(a)).slice(0,60)}
 function renderResults(){
   const el=$('#presults');if(!el)return;
-  const l=filterItems();
-  el.innerHTML=l.length?l.map(i=>`<button class="prod ${itemStock(i)<=0?'out':''}" onclick="posAdd('${i.id}')"><div class="nm">${esc(i.name)}</div><div class="pr">${moneyp(i.sell)}</div><div class="st">متاح: ${num(itemStock(i))} ${esc(i.unit||'')}</div></button>`).join(''):`<div class="empty" style="grid-column:1/-1">${icon('box',40)}<div>${posQ?'لا نتائج':'ابحث عن صنف أو امسح الباركود'}</div></div>`;
+  const l=posResults;
+  el.innerHTML=l.length?l.map(i=>`<button class="prod ${itemStock(i)<=0?'out':''}" onclick="posAdd('${i.id}')"><div class="nm">${esc(i.name)}</div><div class="pr">${moneyp(i.sell)}</div><div class="st">مسلسل ${esc(serialOf(i))} · متاح ${num(itemStock(i))}</div></button>`).join(''):`<div class="empty" style="grid-column:1/-1">${icon('box',40)}<div>${posSearching?'بحمّل…':(posQ.trim()?'لا نتائج':'ابحث بالاسم أو الباركود أو المسلسل')}</div></div>`;
 }
 function renderPOS(){
   renderResults();

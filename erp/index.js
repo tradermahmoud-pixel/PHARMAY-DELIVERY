@@ -147,9 +147,9 @@ app.get('/api/users', auth, async (_req, res) => {
 
 app.get('/api/sync', auth, async (req, res) => {
   const since = parseInt(req.query.since, 10) || 0;
-  // الفواتير (sales) مش بتتزامن للعميل — بتتقرى عند الحاجة من /api/invoices عشان الأداء
+  // الفواتير والأصناف مش بتتزامن للعميل (كتير جدًا) — بتتقرى من endpoints مخصصة عشان الأداء
   const { rows } = await pool.query(
-    "SELECT col,id,data,deleted,seq FROM docs WHERE seq>$1 AND col <> 'sales' ORDER BY seq LIMIT 20000", [since]);
+    "SELECT col,id,data,deleted,seq FROM docs WHERE seq>$1 AND col NOT IN ('sales','items') ORDER BY seq LIMIT 20000", [since]);
   let seq = since;
   const docs = rows.map(r => { if (r.seq > seq) seq = Number(r.seq); return r.deleted ? { c: r.col, i: r.id, x: true } : { c: r.col, i: r.id, d: r.data }; });
   // تقديم المؤشر لتخطّي مستندات الفواتير المستبعَدة (طالما مفيش صفحة ممتلئة)
@@ -318,6 +318,54 @@ app.get('/api/delivery-orders', auth, async (req, res) => {
        ORDER BY o.created_at DESC LIMIT 600`);
     res.json(rows);
   } catch (e) { res.status(500).json({ error: 'delivery', detail: e.message }); }
+});
+
+/* ---- بحث الأصناف الذكي (خادمي، على كل الأصناف) + قائمة + ملخّص مخزون ---- */
+// توحيد عربي: إزالة التشكيل والهمزات وتوحيد الألف/الياء/التاء المربوطة — في SQL وفي Node بنفس الطريقة
+const AR_NORM_SQL = `lower(translate(regexp_replace(COALESCE(data->>'name','')||' '||COALESCE(data->>'barcode','')||' '||COALESCE(data->>'serial',''), '[ًٌٍَُِّْـء]', '', 'g'), 'أإآىئؤة', 'اااييوه'))`;
+function arNorm(s){ return String(s||'').toLowerCase().replace(/[ًٌٍَُِّْـء]/g,'').replace(/[أإآ]/g,'ا').replace(/[ىئ]/g,'ي').replace(/ؤ/g,'و').replace(/ة/g,'ه').trim(); }
+
+app.get('/api/items-search', auth, async (req, res) => {
+  try {
+    const toks = String(req.query.q || '').trim().split(/\s+/).filter(Boolean).slice(0, 6);
+    const lim = Math.min(100, Math.max(1, parseInt(req.query.limit, 10) || 40));
+    if (!toks.length) return res.json([]);
+    const conds = toks.map((_, i) => `${AR_NORM_SQL} LIKE $${i + 1}`);
+    const params = toks.map(t => '%' + arNorm(t) + '%');
+    const { rows } = await pool.query(
+      `SELECT id,data FROM docs WHERE col='items' AND NOT deleted AND ${conds.join(' AND ')}
+       ORDER BY (data->>'stock')::numeric DESC NULLS LAST LIMIT ${lim}`, params);
+    res.json(rows.map(r => Object.assign({ id: r.id }, r.data)));
+  } catch (e) { res.status(500).json({ error: 'search', detail: e.message }); }
+});
+
+app.get('/api/items', auth, async (req, res) => {
+  try {
+    const lim = Math.min(300, Math.max(1, parseInt(req.query.limit, 10) || 100));
+    const off = Math.max(0, parseInt(req.query.offset, 10) || 0);
+    const toks = String(req.query.q || '').trim().split(/\s+/).filter(Boolean).slice(0, 6);
+    const where = ["col='items'", 'NOT deleted']; const params = [];
+    toks.forEach(t => { params.push('%' + arNorm(t) + '%'); where.push(`${AR_NORM_SQL} LIKE $${params.length}`); });
+    if (req.query.low === '1') where.push(`(data->>'min')::numeric>0 AND (data->>'stock')::numeric<=(data->>'min')::numeric`);
+    const { rows } = await pool.query(
+      `SELECT id,data FROM docs WHERE ${where.join(' AND ')} ORDER BY data->>'name' LIMIT ${lim} OFFSET ${off}`, params);
+    res.json(rows.map(r => Object.assign({ id: r.id }, r.data)));
+  } catch (e) { res.status(500).json({ error: 'items', detail: e.message }); }
+});
+
+app.get('/api/stock-summary', auth, async (_req, res) => {
+  try {
+    const s = await pool.query(
+      `SELECT count(*)::int AS items,
+        COALESCE(SUM((data->>'stock')::numeric * COALESCE(NULLIF(data->>'buy','')::numeric,0)),0) AS stock_value,
+        COUNT(*) FILTER (WHERE (data->>'min')::numeric>0 AND (data->>'stock')::numeric<=(data->>'min')::numeric)::int AS low_count
+       FROM docs WHERE col='items' AND NOT deleted`);
+    const low = await pool.query(
+      `SELECT id,data FROM docs WHERE col='items' AND NOT deleted
+        AND (data->>'min')::numeric>0 AND (data->>'stock')::numeric<=(data->>'min')::numeric
+       ORDER BY (data->>'stock')::numeric ASC LIMIT 12`);
+    res.json(Object.assign({}, s.rows[0], { low: low.rows.map(r => Object.assign({ id: r.id }, r.data)) }));
+  } catch (e) { res.status(500).json({ error: 'stock', detail: e.message }); }
 });
 
 /* static + pages (served under the mount, e.g. /erp/...) */
