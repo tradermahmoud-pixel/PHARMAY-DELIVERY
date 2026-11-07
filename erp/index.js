@@ -242,6 +242,19 @@ app.post('/api/ingest', async (req, res) => {
   } finally { client.release(); }
 });
 
+/* ---- تكامل: قراءة طلبات التوصيل من قاعدة الدليفري (نفس القاعدة، سكيمة public) ---- */
+app.get('/api/delivery-orders', auth, async (req, res) => {
+  try {
+    const { rows } = await pool.query(
+      `SELECT o.id, o.no, o.day, o.customer, o.phone, o.address, o.items, o.amount,
+              o.status, o.source, o.created_at, o.out_at, o.delivered_at, d.name AS driver
+       FROM public.orders o LEFT JOIN public.users d ON d.id = o.driver_id
+       WHERE o.day >= (CURRENT_DATE - INTERVAL '3 days')
+       ORDER BY o.created_at DESC LIMIT 600`);
+    res.json(rows);
+  } catch (e) { res.status(500).json({ error: 'delivery', detail: e.message }); }
+});
+
 /* static + pages (served under the mount, e.g. /erp/...) */
 const pub = path.join(__dirname, 'public');
 app.use(express.static(pub, { index: false, maxAge: '1h' }));

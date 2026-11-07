@@ -266,6 +266,7 @@ const ROUTES=[
   {k:'dash',  t:'لوحة التحكم', i:'dash',  sec:'الرئيسية'},
   {k:'pos',   t:'نقطة البيع',  i:'pos'},
   {k:'invoices', t:'الفواتير', i:'bill'},
+  {k:'delivery', t:'التوصيل', i:'truck'},
   {k:'items', t:'الأصناف والمخزون', i:'box', sec:'المخزن'},
   {k:'purch', t:'المشتريات',  i:'cart'},
   {k:'cust',  t:'العملاء',    i:'users', sec:'الحسابات'},
@@ -275,7 +276,7 @@ const ROUTES=[
   {k:'usr',   t:'المستخدمين', i:'shield', owner:true},
 ];
 let route='dash';
-function go(k){route=k;closeNav();window.scrollTo(0,0);render()}
+function go(k){if(delivTimer){clearInterval(delivTimer);delivTimer=null}route=k;closeNav();window.scrollTo(0,0);render()}
 function openNav(){$('#nav').classList.add('open');$('#scrim').classList.add('on')}
 function closeNav(){$('#nav').classList.remove('open');$('#scrim').classList.remove('on')}
 function buildNav(){
@@ -328,7 +329,7 @@ function render(){
   const r=ROUTES.find(x=>x.k===route)||ROUTES[0];
   $('#title').textContent=r.t;
   const v=$('#view');
-  ({dash:vDash,pos:vPOS,invoices:vInvoices,items:vItems,purch:vPurch,cust:vCust,vend:vVend,cash:vCash,emp:vEmp,usr:vUsr}[route]||vDash)(v);
+  ({dash:vDash,pos:vPOS,invoices:vInvoices,delivery:vDelivery,items:vItems,purch:vPurch,cust:vCust,vend:vVend,cash:vCash,emp:vEmp,usr:vUsr}[route]||vDash)(v);
 }
 
 /* ---------- Dashboard ---------- */
@@ -591,6 +592,58 @@ function invShow(id){
       <div class="ln tot"><span>الإجمالي</span><span>${moneyp(s.total)}</span></div>
     </div>
   `,'طباعة',()=>{printReceipt(s)},'lg');
+}
+
+/* ---------- Delivery (طلبات التوصيل — من برنامج التوصيل) ---------- */
+let delivOrders=null, delivTimer=null, delivStatus='all';
+const DSTAT={new:['جديد','n'],ready:['جاهز','w'],out:['مع المندوب','accent'],done:['تم التوصيل','g'],cancel:['ملغي','r']};
+async function loadDeliv(){
+  try{const r=await fetch((window.__BASE__||'')+'/api/delivery-orders',{credentials:'same-origin'});
+    if(!r.ok)throw 0; delivOrders=await r.json();}
+  catch(e){ if(delivOrders===null) delivOrders=[]; }
+}
+function vDelivery(v){
+  if(delivTimer){clearInterval(delivTimer);delivTimer=null;}
+  const paint=()=>{if(route==='delivery'){const vv=$('#view');if(vv)renderDeliv(vv);}};
+  renderDeliv(v);
+  loadDeliv().then(paint);
+  delivTimer=setInterval(()=>loadDeliv().then(paint),20000);
+}
+function renderDeliv(v){
+  if(delivOrders===null){v.innerHTML=`<div class="empty">${icon('truck',44)}<div>بحمّل طلبات التوصيل…</div></div>`;return;}
+  let l=delivOrders.slice();
+  if(delivStatus!=='all')l=l.filter(o=>o.status===delivStatus);
+  const cnt=s=>delivOrders.filter(o=>o.status===s).length;
+  const active=delivOrders.filter(o=>['new','ready','out'].includes(o.status)).length;
+  const money2=n=>num(n)+' ج.م';
+  v.innerHTML=`
+  <div class="kpis" style="grid-template-columns:repeat(auto-fill,minmax(150px,1fr))">
+    <div class="kpi accent"><div class="t">${icon('truck')} طلبات شغّالة</div><div class="v">${num(active)}</div><div class="s">جديد/جاهز/مع المندوب</div></div>
+    <div class="kpi"><div class="t">تم التوصيل اليوم</div><div class="v" style="color:var(--ok)">${num(cnt('done'))}</div></div>
+    <div class="kpi"><div class="t">إجمالي قيمة الطلبات الشغّالة</div><div class="v">${money(delivOrders.filter(o=>['new','ready','out'].includes(o.status)).reduce((s,o)=>s+(+o.amount||0),0))}</div></div>
+  </div>
+  <div class="sbar">
+    <div class="seg" style="max-width:520px;flex-wrap:wrap">
+      <button class="${delivStatus==='all'?'on':''}" onclick="delivStatus='all';renderDeliv($('#view'))">الكل (${delivOrders.length})</button>
+      ${Object.keys(DSTAT).map(s=>`<button class="${delivStatus===s?'on':''}" onclick="delivStatus='${s}';renderDeliv($('#view'))">${DSTAT[s][0]} (${cnt(s)})</button>`).join('')}
+    </div>
+    <div class="sp" style="flex:1"></div>
+    <button class="btn sm" onclick="loadDeliv().then(()=>renderDeliv($('#view')))">${icon('chk')} تحديث</button>
+  </div>
+  <div class="card"><div class="tbl-wrap"><table class="tbl">
+    <thead><tr><th>#</th><th>العميل</th><th>الهاتف</th><th>العنوان</th><th>الأصناف</th><th>القيمة</th><th>المندوب</th><th>الحالة</th></tr></thead>
+    <tbody>${l.length?l.map(o=>{const st=DSTAT[o.status]||['—','n'];return `<tr>
+      <td class="num" style="font-weight:600">${esc(o.no||'')}</td>
+      <td>${esc(o.customer||'—')}</td>
+      <td class="num" dir="ltr" style="text-align:right;font-size:13px">${esc(o.phone||'—')}</td>
+      <td style="max-width:200px;font-size:13px;color:var(--muted)">${esc((o.address||'').slice(0,60))}</td>
+      <td style="max-width:220px;font-size:13px">${esc((o.items||'').slice(0,70))}</td>
+      <td class="num"><b>${money2(o.amount)}</b></td>
+      <td>${o.driver?esc(o.driver):'<span class="pill w">لسه متحددش</span>'}</td>
+      <td><span class="pill ${st[1]}">${st[0]}</span></td>
+    </tr>`}).join(''):`<tr><td colspan=8><div class="empty">${icon('truck',44)}<div>لا طلبات في الحالة دي</div></div></td></tr>`}</tbody>
+  </table></div></div>
+  <p style="color:var(--muted);font-size:12px;margin-top:10px">بيتحدّث تلقائيًا كل ٢٠ ثانية · طلبات آخر ٣ أيام · تعيين المندوب بيتم من برنامج التوصيل</p>`;
 }
 
 /* ---------- Purchases ---------- */
