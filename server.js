@@ -811,6 +811,25 @@ app.get("/api/orders/:id/changes", auth, wrap(async (req, res) => {
   res.json(rows);
 }));
 
+// كل أرقام وعناوين عميل الأوردر — متاح لأي مستخدم مسجّل (مالك/موظف/طيار) عند الضغط على اسم العميل
+app.get("/api/orders/:id/client", auth, wrap(async (req, res) => {
+  const id = Number(req.params.id);
+  const o = (await q(`SELECT client_id, customer, phone, address FROM orders WHERE id=$1`, [id])).rows[0];
+  if (!o) return res.status(404).json({ error: "الأوردر مش موجود" });
+  // الطيار يشوف بيانات العملاء للأوردرات اللي معاه أو الجاهزة فقط
+  if (req.user.role === "driver") {
+    const d = (await q(`SELECT driver_id, status FROM orders WHERE id=$1`, [id])).rows[0];
+    if (!d || !(d.driver_id === req.user.id || d.status === "ready")) return res.status(403).json({ error: "الأوردر ده مش معاك" });
+  }
+  let phones = [], addresses = [];
+  if (o.client_id) {
+    phones = (await q(`SELECT phone FROM client_phones WHERE client_id=$1 ORDER BY phone`, [o.client_id])).rows.map(r => r.phone);
+    addresses = (await q(`SELECT id, label, address, area, lat, lng, location_url FROM client_addresses WHERE client_id=$1
+      ORDER BY last_used_at DESC NULLS LAST, id DESC`, [o.client_id])).rows;
+  }
+  res.json({ customer: o.customer, order_phone: o.phone, order_address: o.address, linked: !!o.client_id, phones, addresses });
+}));
+
 /* ---- clients (customers) ---- */
 const staffOnly = allow("admin", "staff");
 app.get("/api/clients", auth, staffOnly, wrap(async (req, res) => {

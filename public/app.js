@@ -366,7 +366,7 @@
     return `<article class="card st-${o.status} ${lt === "late" && !isFinal(o) ? "is-late" : lt === "warn" && !isFinal(o) ? "is-warn" : ""}">
       <div class="top">
         <div style="min-width:0">
-          <div class="who">#${o.no} · ${esc(o.customer)} <span class="pill ${o.status === "cancel" ? "late" : ""}">${st.label}</span></div>
+          <div class="who">#${o.no} · <span class="cust-link" data-act="custInfo" data-id="${o.id}" role="button" tabindex="0" title="كل أرقام وعناوين العميل">${esc(o.customer)}</span> <span class="pill ${o.status === "cancel" ? "late" : ""}">${st.label}</span></div>
           <div class="addr">${esc(o.address)}</div>
         </div>
         <div class="clock ${lt}">${clockTxt}</div>
@@ -986,6 +986,24 @@
       ${others.length ? `<div class="ci-h">الأرقام</div>${others.map(tel).join("")}` : ""}
       ${addrs.length ? `<div class="ci-h">العناوين التانية</div>${addrs.map(adr).join("")}` : ""}</details>`;
   }
+  // نافذة كل أرقام وعناوين العميل (عند الضغط على الاسم) — للمالك والموظف والطيار
+  function custInfoSheet(ci) {
+    const tel = p => { const intl = p.startsWith("0") ? "2" + p : p;
+      return `<div class="ci-row"><span class="num">${esc(p)}</span><span class="row"><a class="btn small" href="tel:${esc(p)}">اتصال</a><a class="btn small" href="https://wa.me/${intl}" target="_blank" rel="noopener">واتساب</a></span></div>`; };
+    const adr = a => { const loc = a.lat != null ? `https://www.google.com/maps/dir/?api=1&destination=${a.lat},${a.lng}` : a.location_url;
+      return `<div class="ci-row"><span>${a.label ? `<b>${esc(a.label)}</b> · ` : ""}${esc(a.address || "لوكيشن بس")}${a.area ? ` <span class="pill area">${esc(a.area)}</span>` : ""}</span>
+        ${loc ? `<a class="btn small" href="${esc(loc)}" target="_blank" rel="noopener">الخريطة</a>` : ""}</div>`; };
+    const phones = (ci.phones && ci.phones.length) ? ci.phones : (ci.order_phone ? [ci.order_phone] : []);
+    const hasAddr = ci.addresses && ci.addresses.length;
+    sheet(`<div class="row spread"><h2>${esc(ci.customer || "العميل")}</h2><button class="btn small" data-act="closeSheet">قفل</button></div>
+      <div class="sheet-scroll list">
+        <div class="ci-h">كل الأرقام${phones.length > 1 ? ` <span class="hint">(${phones.length})</span>` : ""}</div>
+        ${phones.length ? phones.map(tel).join("") : `<p class="hint" style="margin:0">مفيش أرقام</p>`}
+        <div class="ci-h">كل العناوين${hasAddr && ci.addresses.length > 1 ? ` <span class="hint">(${ci.addresses.length})</span>` : ""}</div>
+        ${hasAddr ? ci.addresses.map(adr).join("") : `<div class="ci-row"><span>${esc(ci.order_address || "مفيش عنوان محفوظ")}</span></div>`}
+        ${!ci.linked ? `<p class="hint" style="margin:8px 0 0">العميل ده مش مربوط بملف في برنامج التوصيل (اتسجّل من Genius برقم مش مطابق). أول ما رقمه يتطابق مع عميل، كل أرقامه وعناوينه هتظهر هنا.</p>` : ""}
+      </div>`);
+  }
   const editedOnRoad = o => !!(o.edited_at && o.out_at && ts(o.edited_at) > ts(o.out_at));
   const FIELD_LABEL = { items: "الطلب", amount: "المبلغ", delivery_fee: "منها توصيل", payment: "طريقة الدفع", promise_min: "وعد التوصيل", address: "العنوان" };
   const EDIT_NOTES = ["العميل زوّد أصناف", "العميل لغى صنف", "صنف مش متوفر", "تغيير الكمية", "تصحيح"];
@@ -1059,6 +1077,7 @@
     if (a.dataset.act === "closeSheet" && e.target.closest("[data-stop]") && !e.target.closest("button")) return;
     const id = Number(a.dataset.id), o = S.orders.find(x => x.id === id);
     switch (a.dataset.act) {
+      case "custInfo": { try { custInfoSheet(await api(`/api/orders/${id}/client`)); } catch (err) { toast(err.message); } break; }
       case "advance":
         if (a.dataset.to === "done" && o) { collectSheet(o); break; }
         a.disabled = true;

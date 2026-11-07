@@ -664,11 +664,16 @@ function delivStatusAct(orderId,status){
 }
 function vDelivery(v){
   if(delivTimer){clearInterval(delivTimer);delivTimer=null;}
-  if(!delivDrivers.length)loadDrivers();
-  const paint=()=>{if(route==='delivery'){const vv=$('#view');if(vv)renderDeliv(vv);}};
-  renderDeliv(v);
-  loadDeliv().then(paint);
-  delivTimer=setInterval(()=>loadDeliv().then(paint),20000);
+  // الدمج: تبويب التوصيل بيعرض برنامج التوصيل نفسه (نفس الدومين) — نفس الشكل وكل المزايا
+  v.innerHTML=`
+  <div class="sbar" style="margin-bottom:10px">
+    <div style="font-weight:600;display:flex;align-items:center;gap:7px">${icon('truck')} برنامج التوصيل</div>
+    <div class="sp" style="flex:1"></div>
+    <button class="btn sm gho" onclick="var f=document.getElementById('delivFrame');if(f)f.src=f.src">${icon('chk')} تحديث</button>
+    <a class="btn sm" href="/" target="_blank" rel="noopener">فتح في نافذة ↗</a>
+  </div>
+  <iframe id="delivFrame" src="/" title="برنامج التوصيل" allow="geolocation"
+    style="width:100%;height:calc(100dvh - 160px);min-height:460px;border:1px solid var(--line);border-radius:14px;background:#fff;display:block"></iframe>`;
 }
 function renderDeliv(v){
   if(delivOrders===null){v.innerHTML=`<div class="empty">${icon('truck',44)}<div>بحمّل طلبات التوصيل…</div></div>`;return;}

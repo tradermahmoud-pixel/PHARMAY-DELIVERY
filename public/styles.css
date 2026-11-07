@@ -62,6 +62,8 @@ textarea{min-height:60px;resize:vertical}
 .card.is-warn{background:var(--warn-soft)}
 .card .top{display:flex;justify-content:space-between;gap:8px;align-items:flex-start}
 .card .who{font-weight:600;min-width:0}
+.cust-link{cursor:pointer;text-decoration:underline;text-decoration-style:dotted;text-underline-offset:3px;-webkit-tap-highlight-color:transparent}
+.cust-link:hover,.cust-link:focus{color:var(--brand,#0E7C66);outline:none}
 .card .addr{color:var(--muted);font-size:.9rem;overflow-wrap:anywhere}
 .card .items{font-size:.9rem;overflow-wrap:anywhere}
 .clock{font-family:var(--display);font-variant-numeric:tabular-nums;font-size:1.05rem;white-space:nowrap;text-align:left}
