@@ -1,0 +1,25 @@
+name: keepalive
+
+# بيمنع سيرفر Render المجاني من النوم: بيضرب على /healthz كل ١٠ دقايق
+# (مواعيد GitHub أحيانًا بتتأخّر شوية، بس بتكفي لإبقاء الخدمة صاحية في أوقات التشغيل)
+
+on:
+  schedule:
+    - cron: '*/10 * * * *'
+  workflow_dispatch: {}
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Ping ERP health endpoint
+        run: |
+          URL="https://pharmacy-delivery-ekv2.onrender.com/healthz"
+          for i in 1 2 3 4; do
+            code=$(curl -s -o /dev/null -w "%{http_code}" --max-time 70 "$URL" || echo 000)
+            echo "attempt $i -> HTTP $code"
+            if [ "$code" = "200" ]; then exit 0; fi
+            sleep 15
+          done
+          echo "no 200 yet (service may still be waking up) — not failing the job"
+          exit 0
