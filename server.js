@@ -752,7 +752,25 @@ app.post("/api/ingest-genius", express.json({ limit: "6mb" }), wrap(async (req, 
     } catch (e) { await conn.query("ROLLBACK").catch(() => {}); }
     finally { conn.release(); }
   }
-  res.json({ ok: true, created, skipped });
+  // مصالحة: الطلبات اللي اتسحبت من Genius ومبقتش ضمن المعلّقة (يعني اتقفلت/اتحفظت هناك)
+  // تتلغى تلقائيًا — بس اللي لسه «جديد/جاهز» (مش بنلمس اللي مع مندوب أو اتسلّم)
+  let cancelled = 0;
+  if (req.body && req.body.reconcile && Array.isArray(req.body.keepIds)) {
+    const keep = req.body.keepIds.map(x => String(x || "").trim()).filter(Boolean);
+    const lb = Math.min(60, Math.max(1, Number(req.body.lookbackDays) || 7));
+    const r = await q(
+      `UPDATE orders SET status='cancel', updated_at=now()
+       WHERE source='Genius' AND status IN ('new','ready') AND ext_ref IS NOT NULL
+         AND created_at > now() - ($1::int * interval '1 day')
+         AND NOT (ext_ref = ANY($2::text[]))
+       RETURNING id`, [lb, keep]);
+    cancelled = r.rows.length;
+    for (const row of r.rows) {
+      await q(`INSERT INTO order_changes(order_id, user_id, kind, fields, note) VALUES ($1,NULL,'status',$2,$3)`,
+        [row.id, JSON.stringify({ status: ["", "cancel"] }), "إلغاء تلقائي — الفاتورة اتقفلت/اتحفظت في Genius"]).catch(() => {});
+    }
+  }
+  res.json({ ok: true, created, skipped, cancelled });
 }));
 
 app.put("/api/orders/:id", auth, allow("admin", "staff"), wrap(async (req, res) => {

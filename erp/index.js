@@ -181,9 +181,15 @@ app.get('/api/sync', auth, async (req, res) => {
   res.json({ full: since === 0, docs, seq });
 });
 
-// ملخّص المبيعات للوحة التحكم (محسوب في السيرفر — رد صغير وسريع)
+/* كاش بسيط للملخّصات — يخفّف المسح المتكرر على السيرفر المجاني (يتصفّر عند أي كتابة) */
+const _sum = new Map();
+async function memo(key, ttl, fn) { const c = _sum.get(key); if (c && Date.now() - c.t < ttl) return c.v; const v = await fn(); _sum.set(key, { t: Date.now(), v }); return v; }
+function bustSummaries() { _sum.clear(); }
+
+// ملخّص المبيعات للوحة التحكم (محسوب في السيرفر — رد صغير وسريع، بكاش ٦٠ث)
 app.get('/api/sales-summary', auth, async (_req, res) => {
   try {
+    const out = await memo('sales', 60000, async () => {
     const daily = await pool.query(
       `SELECT d.data->>'date' AS day,
               SUM((d.data->>'total')::numeric) AS sales,
@@ -205,7 +211,9 @@ app.get('/api/sales-summary', auth, async (_req, res) => {
        WHERE d.col='sales' AND NOT d.deleted
          AND d.data->>'date' >= to_char((now() AT TIME ZONE 'Africa/Cairo')::date - 30, 'YYYY-MM-DD')
        GROUP BY name ORDER BY val DESC NULLS LAST LIMIT 6`);
-    res.json({ daily: daily.rows, top: top.rows });
+    return { daily: daily.rows, top: top.rows };
+    });
+    res.json(out);
   } catch (e) { res.status(500).json({ error: 'summary', detail: e.message }); }
 });
 
@@ -257,6 +265,7 @@ app.post('/api/write', auth, async (req, res) => {
       }
     }
     await client.query('COMMIT');
+    bustSummaries();
     res.json({ docs: out });
   } catch (e) { await client.query('ROLLBACK').catch(() => {}); res.status(500).json({ error: 'write' }); }
   finally { client.release(); }
@@ -309,6 +318,7 @@ app.post('/api/ingest', async (req, res) => {
       deleted = r.rowCount;
     }
     await client.query('COMMIT');
+    if (changed || deleted) bustSummaries();
     res.json({ ok: true, collection: col, received: docs.length, changed, deleted });
   } catch (e) {
     await client.query('ROLLBACK').catch(() => {});
@@ -435,6 +445,7 @@ app.get('/api/items', auth, async (req, res) => {
 
 app.get('/api/stock-summary', auth, async (_req, res) => {
   try {
+    const out = await memo('stock', 60000, async () => {
     const s = await pool.query(
       `SELECT count(*)::int AS items,
         COALESCE(SUM((data->>'stock')::numeric * COALESCE(NULLIF(data->>'buy','')::numeric,0)),0) AS stock_value,
@@ -444,7 +455,9 @@ app.get('/api/stock-summary', auth, async (_req, res) => {
       `SELECT id,data FROM docs WHERE col='items' AND NOT deleted
         AND (data->>'min')::numeric>0 AND (data->>'stock')::numeric<=(data->>'min')::numeric
        ORDER BY (data->>'stock')::numeric ASC LIMIT 12`);
-    res.json(Object.assign({}, s.rows[0], { low: low.rows.map(r => Object.assign({ id: r.id }, r.data)) }));
+    return Object.assign({}, s.rows[0], { low: low.rows.map(r => Object.assign({ id: r.id }, r.data)) });
+    });
+    res.json(out);
   } catch (e) { res.status(500).json({ error: 'stock', detail: e.message }); }
 });
 
@@ -455,11 +468,14 @@ const CUST_NORM_SQL = `lower(translate(regexp_replace(COALESCE(data->>'name','')
 // ملخّص الحسابات للوحة التحكم (عدد العملاء + إجمالي ديونهم) بدون تحميل الكل
 app.get('/api/parties-summary', auth, async (_req, res) => {
   try {
-    const { rows } = await pool.query(
-      `SELECT count(*)::int AS cust_count,
-              COALESCE(SUM(GREATEST(COALESCE(NULLIF(data->>'balance','')::numeric,0),0)),0) AS cust_debt
-       FROM docs WHERE col='customers' AND NOT deleted`);
-    res.json(rows[0]);
+    const out = await memo('parties', 60000, async () => {
+      const { rows } = await pool.query(
+        `SELECT count(*)::int AS cust_count,
+                COALESCE(SUM(GREATEST(COALESCE(NULLIF(data->>'balance','')::numeric,0),0)),0) AS cust_debt
+         FROM docs WHERE col='customers' AND NOT deleted`);
+      return rows[0];
+    });
+    res.json(out);
   } catch (e) { res.status(500).json({ error: 'parties', detail: e.message }); }
 });
 
@@ -506,6 +522,7 @@ app.post('/api/customer-credit', auth, async (req, res) => {
       out = Object.assign({ id }, d);
     }
     await client.query('COMMIT');
+    bustSummaries();
     res.json({ ok: true, customer: out });
   } catch (e) { await client.query('ROLLBACK').catch(() => {}); res.status(500).json({ error: 'credit', detail: e.message }); }
   finally { client.release(); }
