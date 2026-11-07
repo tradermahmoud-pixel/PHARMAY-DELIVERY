@@ -67,6 +67,8 @@ async function migrate() {
     ALTER TABLE orders ADD COLUMN IF NOT EXISTS loc_token TEXT UNIQUE;
     ALTER TABLE orders ADD COLUMN IF NOT EXISTS loc_at TIMESTAMPTZ;
     ALTER TABLE orders ADD COLUMN IF NOT EXISTS loc_source TEXT;
+    ALTER TABLE orders ADD COLUMN IF NOT EXISTS ext_ref TEXT;
+    CREATE UNIQUE INDEX IF NOT EXISTS orders_ext_ref_idx ON orders(ext_ref);
     CREATE TABLE IF NOT EXISTS customers (
       phone TEXT PRIMARY KEY,
       name TEXT NOT NULL DEFAULT '',
@@ -710,6 +712,48 @@ const EDITABLE = {
   promise_min: v => Math.min(240, Math.max(10, Math.round(num(v, 60)))),
   address: v => String(v ?? "").trim().slice(0, 300),
 };
+// استقبال الفواتير المعلّقة للتوصيل من Genius: تتعمل طلبات بدون مندوب (status=new)، والمستخدم يختار المندوب.
+// محمية بتوكن (نفس توكن المزامنة). منع التكرار عبر ext_ref (معرّف الفاتورة في Genius).
+app.post("/api/ingest-genius", express.json({ limit: "6mb" }), wrap(async (req, res) => {
+  const tok = process.env.ERP_SYNC_TOKEN;
+  if (!tok || req.get("X-Sync-Token") !== tok) return res.status(403).json({ error: "forbidden" });
+  const orders = Array.isArray(req.body && req.body.orders) ? req.body.orders : [];
+  let created = 0, skipped = 0;
+  for (const o of orders) {
+    const ext = String(o.ext_ref || "").trim();
+    if (!ext) continue;
+    if ((await q(`SELECT 1 FROM orders WHERE ext_ref=$1`, [ext])).rows[0]) { skipped++; continue; }
+    const name = String(o.customer || "").trim() || "عميل";
+    const phones = (Array.isArray(o.phones) ? o.phones : [o.phone]).map(p => String(p || "").trim()).filter(Boolean);
+    const mainPhone = phones[0] || "";
+    let clientId = mainPhone ? await clientIdByPhone(mainPhone) : null;
+    if (!clientId) clientId = (await q(`INSERT INTO clients(name) VALUES ($1) RETURNING id`, [name])).rows[0].id;
+    for (const p of phones) await addPhone(clientId, p);
+    await q(`UPDATE clients SET name = CASE WHEN name='' THEN $2 ELSE name END, updated_at=now() WHERE id=$1`, [clientId, name]);
+    const addressText = String(o.address || "").trim();
+    let addressId = null;
+    if (addressText) { try { addressId = (await upsertAddress(clientId, { address: addressText })).id; } catch (e) {} }
+    const day = todayCairo();
+    const conn = await pool.connect();
+    try {
+      await conn.query("BEGIN");
+      const c = await conn.query(
+        `INSERT INTO day_counter(day,n) VALUES ($1,1) ON CONFLICT(day) DO UPDATE SET n=day_counter.n+1 RETURNING n`, [day]);
+      const ins = await conn.query(
+        `INSERT INTO orders(day,no,customer,phone,address,items,amount,source,payment,client_id,address_id,ext_ref,status)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,'Genius',$8,$9,$10,$11,'new')
+         ON CONFLICT (ext_ref) DO NOTHING RETURNING id`,
+        [day, c.rows[0].n, name, normPhone(mainPhone) || mainPhone, addressText,
+         String(o.items || "").trim(), num(o.amount, 0) || 0,
+         METHODS.includes(o.payment) ? o.payment : "نقدي", clientId, addressId, ext]);
+      await conn.query("COMMIT");
+      if (ins.rows[0]) created++; else skipped++;
+    } catch (e) { await conn.query("ROLLBACK").catch(() => {}); }
+    finally { conn.release(); }
+  }
+  res.json({ ok: true, created, skipped });
+}));
+
 app.put("/api/orders/:id", auth, allow("admin", "staff"), wrap(async (req, res) => {
   const id = Number(req.params.id); const b = req.body || {};
   const o = (await q(`SELECT * FROM orders WHERE id=$1`, [id])).rows[0];
