@@ -69,6 +69,8 @@
     const me = await api('/api/me'); MZ.me = me;
     const cached = await IDB.get(CK);
     if (cached && cached.user === me.id && cached.store) { Object.assign(store, cached.store); seq = cached.seq || 0; }
+    // تنظيف الكاش القديم: المجموعات التقيلة (مش بتتزامن للعميل) تُقرأ من الخادم عند الحاجة
+    for (const k of ['sales', 'items', 'customers']) { if (store[k]) delete store[k]; }
     const t0 = performance.now();
     const r = await api('/api/sync?since=' + seq);
     if (r.full) { for (const k of Object.keys(store)) delete store[k]; }

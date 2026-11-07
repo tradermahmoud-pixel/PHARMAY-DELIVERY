@@ -81,6 +81,19 @@ async function migrate() {
       token text PRIMARY KEY, user_id text NOT NULL REFERENCES users(id) ON DELETE CASCADE,
       created_at bigint NOT NULL, last_seen bigint NOT NULL);
   `);
+  // فهارس الأداء (best-effort — أي فشل ما يوقفش الإقلاع) — تسرّع البحث والتجميعات مع كبر البيانات
+  const perfIdx = [
+    `CREATE EXTENSION IF NOT EXISTS pg_trgm`,
+    // بحث الأصناف الذكي (اسم/باركود/مسلسل) — فهرس trigram على نفس تعبير التطبيع المستخدم في الاستعلام
+    `CREATE INDEX IF NOT EXISTS docs_items_trgm ON docs USING gin ((lower(translate(regexp_replace(COALESCE(data->>'name','')||' '||COALESCE(data->>'barcode','')||' '||COALESCE(data->>'serial',''), '[ًٌٍَُِّْـء]', '', 'g'), 'أإآىئؤة', 'اااييوه'))) gin_trgm_ops) WHERE col='items' AND NOT deleted`,
+    // بحث العملاء (اسم/هاتف)
+    `CREATE INDEX IF NOT EXISTS docs_cust_trgm ON docs USING gin ((lower(translate(regexp_replace(COALESCE(data->>'name','')||' '||COALESCE(data->>'phone',''), '[ًٌٍَُِّْـء]', '', 'g'), 'أإآىئؤة', 'اااييوه'))) gin_trgm_ops) WHERE col='customers' AND NOT deleted`,
+    // الفواتير/المبيعات بالتاريخ (ملخّص لوحة التحكم + شاشة الفواتير)
+    `CREATE INDEX IF NOT EXISTS docs_sales_date ON docs ((data->>'date')) WHERE col='sales' AND NOT deleted`,
+    `CREATE INDEX IF NOT EXISTS docs_sales_ts ON docs (((data->>'ts')::bigint)) WHERE col='sales' AND NOT deleted`,
+  ];
+  // بناء الفهارس في الخلفية — ما يأخّرش إقلاع السيرفر ولا يفشّله
+  (async () => { for (const sql of perfIdx) { try { await pool.query(sql); } catch (e) { console.warn('[erp] idx skip:', (e.message || '').split('\n')[0]); } } console.log('[erp] perf indexes ready'); })();
   const { rows } = await pool.query('SELECT count(*)::int n FROM users');
   if (rows[0].n === 0) {
     const u = (process.env.ERP_ADMIN_USER || 'owner').trim().toLowerCase();
