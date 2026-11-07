@@ -147,11 +147,64 @@ app.get('/api/users', auth, async (_req, res) => {
 
 app.get('/api/sync', auth, async (req, res) => {
   const since = parseInt(req.query.since, 10) || 0;
+  // الفواتير (sales) مش بتتزامن للعميل — بتتقرى عند الحاجة من /api/invoices عشان الأداء
   const { rows } = await pool.query(
-    'SELECT col,id,data,deleted,seq FROM docs WHERE seq>$1 ORDER BY seq LIMIT 20000', [since]);
+    "SELECT col,id,data,deleted,seq FROM docs WHERE seq>$1 AND col <> 'sales' ORDER BY seq LIMIT 20000", [since]);
   let seq = since;
   const docs = rows.map(r => { if (r.seq > seq) seq = Number(r.seq); return r.deleted ? { c: r.col, i: r.id, x: true } : { c: r.col, i: r.id, d: r.data }; });
+  // تقديم المؤشر لتخطّي مستندات الفواتير المستبعَدة (طالما مفيش صفحة ممتلئة)
+  if (rows.length < 20000) {
+    const mx = await pool.query('SELECT COALESCE(MAX(seq),$1) m FROM docs WHERE seq>$1', [since]);
+    const m = Number(mx.rows[0].m); if (m > seq) seq = m;
+  }
   res.json({ full: since === 0, docs, seq });
+});
+
+// ملخّص المبيعات للوحة التحكم (محسوب في السيرفر — رد صغير وسريع)
+app.get('/api/sales-summary', auth, async (_req, res) => {
+  try {
+    const daily = await pool.query(
+      `SELECT d.data->>'date' AS day,
+              SUM((d.data->>'total')::numeric) AS sales,
+              SUM(COALESCE(li.p,0)) - SUM(COALESCE((d.data->>'discount')::numeric,0)) AS profit,
+              count(*) AS n
+       FROM docs d
+       LEFT JOIN LATERAL (
+         SELECT SUM(((l->>'price')::numeric - COALESCE((l->>'cost')::numeric,0)) * (l->>'qty')::numeric) AS p
+         FROM jsonb_array_elements(d.data->'lines') l
+       ) li ON true
+       WHERE d.col='sales' AND NOT d.deleted
+         AND d.data->>'date' >= to_char((now() AT TIME ZONE 'Africa/Cairo')::date - 34, 'YYYY-MM-DD')
+       GROUP BY day`);
+    const top = await pool.query(
+      `SELECT l->>'name' AS name,
+              SUM((l->>'qty')::numeric) AS qty,
+              SUM((l->>'price')::numeric*(l->>'qty')::numeric) AS val
+       FROM docs d, jsonb_array_elements(d.data->'lines') l
+       WHERE d.col='sales' AND NOT d.deleted
+         AND d.data->>'date' >= to_char((now() AT TIME ZONE 'Africa/Cairo')::date - 30, 'YYYY-MM-DD')
+       GROUP BY name ORDER BY val DESC NULLS LAST LIMIT 6`);
+    res.json({ daily: daily.rows, top: top.rows });
+  } catch (e) { res.status(500).json({ error: 'summary', detail: e.message }); }
+});
+
+// الفواتير عند الطلب (صفحة بصفحة) — بدل مزامنتها كلها
+app.get('/api/invoices', auth, async (req, res) => {
+  try {
+    const days = Math.min(400, Math.max(1, parseInt(req.query.days, 10) || 30));
+    const lim = Math.min(500, Math.max(1, parseInt(req.query.limit, 10) || 300));
+    const off = Math.max(0, parseInt(req.query.offset, 10) || 0);
+    const qraw = String(req.query.q || '').trim();
+    const qlike = '%' + qraw.replace(/[%_]/g, '') + '%';
+    const { rows } = await pool.query(
+      `SELECT id, data FROM docs
+       WHERE col='sales' AND NOT deleted
+         AND data->>'date' >= to_char((now() AT TIME ZONE 'Africa/Cairo')::date - $1::int, 'YYYY-MM-DD')
+         AND ($2='' OR data->>'customer' ILIKE $3 OR data->>'no' ILIKE $3)
+       ORDER BY (data->>'ts')::bigint DESC NULLS LAST
+       LIMIT $4 OFFSET $5`, [days, qraw, qlike, lim, off]);
+    res.json(rows.map(r => Object.assign({ id: r.id }, r.data)));
+  } catch (e) { res.status(500).json({ error: 'invoices', detail: e.message }); }
 });
 
 app.post('/api/write', auth, async (req, res) => {

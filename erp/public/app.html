@@ -245,7 +245,7 @@ const icon=(k,w)=>`<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" st
 
 /* ============================= data layer ============================= */
 let DB,USER,ME;
-const COLS=['items','sales','purchases','customers','vendors','cash','employees','attendance','settings'];
+const COLS=['items','purchases','customers','vendors','cash','employees','attendance','settings'];
 const state={}; COLS.forEach(c=>state[c]={});
 const arr=c=>Object.values(state[c]||{});
 const get=(c,id)=>state[c]&&state[c][id];
@@ -333,24 +333,31 @@ function render(){
 }
 
 /* ---------- Dashboard ---------- */
+let salesSummary=null, summaryAt=0, summaryLoading=false;
+function isoLocal(off){const d=new Date();d.setDate(d.getDate()-(off||0));return d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0')}
+function refreshSummary(force){
+  if(summaryLoading)return; if(!force && Date.now()-summaryAt<15000)return;
+  summaryLoading=true;
+  fetch((window.__BASE__||'')+'/api/sales-summary',{credentials:'same-origin'})
+    .then(r=>r.ok?r.json():null).then(j=>{if(j){salesSummary=j;summaryAt=Date.now();if(route==='dash'){const vv=$('#view');if(vv)vDash(vv);}}})
+    .catch(()=>{}).finally(()=>{summaryLoading=false});
+}
 function vDash(v){
-  const t0=dayStart(0),t1=dayStart(-1);
-  const today=salesBetween(t0,Date.now()+1), yest=salesBetween(t1,t0);
-  const tSales=today.reduce((s,x)=>s+(+x.total||0),0);
-  const tProfit=today.reduce((s,x)=>s+saleProfit(x),0);
+  refreshSummary();
+  const S=salesSummary||{daily:[],top:[]};
+  const byDate={};(S.daily||[]).forEach(r=>byDate[r.day]={sales:+r.sales||0,profit:+r.profit||0,n:+r.n||0});
+  const dz={sales:0,profit:0,n:0};
+  const today=byDate[isoLocal(0)]||dz, yest=byDate[isoLocal(1)]||dz;
+  const tSales=today.sales, tProfit=today.profit;
   const low=lowItems();
-  // 14-day chart
-  const days=[];for(let i=13;i>=0;i--){const a=dayStart(i),b=dayStart(i-1);const ss=salesBetween(a,b);days.push({d:a,v:ss.reduce((s,x)=>s+(+x.total||0),0),n:ss.length})}
+  const days=[];for(let i=13;i>=0;i--){const r=byDate[isoLocal(i)]||dz;days.push({d:dayStart(i),v:r.sales,n:r.n})}
   const mx=Math.max(1,...days.map(d=>d.v));
-  const month=salesBetween(dayStart(29),Date.now()+1);
-  const mSales=month.reduce((s,x)=>s+(+x.total||0),0), mProfit=month.reduce((s,x)=>s+saleProfit(x),0);
-  // top items this month
-  const im={};month.forEach(s=>(s.lines||[]).forEach(l=>{const k=l.item||l.name;if(!im[k])im[k]={name:l.name,qty:0,val:0};im[k].qty+=+l.qty||0;im[k].val+=(+l.price||0)*(+l.qty||0)}));
-  const top=Object.values(im).sort((a,b)=>b.val-a.val).slice(0,6);
+  let mSales=0,mProfit=0;const m0=isoLocal(29);(S.daily||[]).forEach(r=>{if(r.day>=m0){mSales+=+r.sales||0;mProfit+=+r.profit||0}});
+  const top=(S.top||[]).map(t=>({name:t.name,qty:+t.qty||0,val:+t.val||0}));
 
   v.innerHTML=`
   <div class="kpis">
-    <div class="kpi accent"><div class="t">${icon('pos')} مبيعات اليوم</div><div class="v">${money(tSales)}</div><div class="s">${today.length} فاتورة · أمس ${moneyp(yest.reduce((s,x)=>s+(+x.total||0),0))}</div></div>
+    <div class="kpi accent"><div class="t">${icon('pos')} مبيعات اليوم</div><div class="v">${money(tSales)}</div><div class="s">${today.n} فاتورة · أمس ${moneyp(yest.sales)}</div></div>
     <div class="kpi"><div class="t">${icon('profit')} ربح اليوم</div><div class="v">${money(tProfit)}</div><div class="s">هامش ${tSales?Math.round(tProfit/tSales*100):0}%</div></div>
     <div class="kpi"><div class="t">${icon('cash')} رصيد الخزنة</div><div class="v">${money(cashBalance())}</div><div class="s">صافي النقدية</div></div>
     <div class="kpi"><div class="t">${icon('box')} قيمة المخزون</div><div class="v">${money(stockValue())}</div><div class="s">${arr('items').length} صنف</div></div>
@@ -534,31 +541,34 @@ function printReceipt(s){
 }
 
 /* ---------- Invoices (الفواتير) ---------- */
-let invQ='', invRange='30';
-function invFiltered(){
-  let l=arr('sales').slice();
-  if(invRange!=='all'){const from=dayStart((+invRange||1)-1);l=l.filter(s=>(s.ts||0)>=from)}
-  const q=invQ.trim().toLowerCase();
-  if(q)l=l.filter(s=>String(s.no||'').includes(q)||(s.customer||'').toLowerCase().includes(q));
-  return l.sort((a,b)=>(b.ts||0)-(a.ts||0));
+let invQ='', invRange='30', invData=[], invLoading=false, invKey=null;
+function invDays(){return invRange==='1'?1:invRange==='7'?7:invRange==='all'?400:30}
+function loadInvoices(){
+  invLoading=true;const key=invRange+'|'+invQ.trim();invKey=key;
+  const u=(window.__BASE__||'')+'/api/invoices?days='+invDays()+'&limit=500&q='+encodeURIComponent(invQ.trim());
+  fetch(u,{credentials:'same-origin'}).then(r=>r.ok?r.json():[]).then(j=>{invData=Array.isArray(j)?j:[];})
+    .catch(()=>{invData=[];}).finally(()=>{invLoading=false;if(route==='invoices'){const vv=$('#view');if(vv)vInvoices(vv);}});
 }
 function vInvoices(v){
-  const l=invFiltered();
+  const key=invRange+'|'+invQ.trim();
+  if(key!==invKey && !invLoading){loadInvoices();}
+  const l=invData;
   const tot=l.reduce((s,x)=>s+(+x.total||0),0);
   v.innerHTML=`
   <div class="sbar">
     <div class="search">${icon('search')}<input id="q" placeholder="بحث برقم الفاتورة أو اسم العميل…" value="${esc(invQ)}"></div>
     <div class="seg" style="max-width:380px">
-      ${[['1','اليوم'],['7','٧ أيام'],['30','٣٠ يوم'],['all','الكل']].map(o=>`<button class="${invRange===o[0]?'on':''}" onclick="invRange='${o[0]}';render()">${o[1]}</button>`).join('')}
+      ${[['1','اليوم'],['7','٧ أيام'],['30','٣٠ يوم'],['all','الكل']].map(o=>`<button class="${invRange===o[0]?'on':''}" onclick="invRange='${o[0]}';invKey=null;vInvoices($('#view'))">${o[1]}</button>`).join('')}
     </div>
   </div>
-  <div class="card" style="padding:12px 18px;margin-bottom:14px;display:flex;gap:28px;flex-wrap:wrap">
+  <div class="card" style="padding:12px 18px;margin-bottom:14px;display:flex;gap:28px;flex-wrap:wrap;align-items:center">
     <div><div style="font-size:12px;color:var(--muted)">عدد الفواتير</div><div style="font:700 21px/1.1 'IBM Plex Sans Arabic'">${num(l.length)}</div></div>
     <div><div style="font-size:12px;color:var(--muted)">إجمالي المبيعات</div><div style="font:700 21px/1.1 'IBM Plex Sans Arabic';color:var(--brand)">${moneyp(tot)}</div></div>
+    ${invLoading?'<div style="color:var(--muted);font-size:13px">بحمّل…</div>':''}
   </div>
   <div class="card"><div class="tbl-wrap"><table class="tbl">
     <thead><tr><th>#</th><th>التاريخ والوقت</th><th>العميل</th><th>أصناف</th><th>الخصم</th><th>الإجمالي</th><th>الدفع</th></tr></thead>
-    <tbody>${l.length?l.slice(0,500).map(s=>`<tr style="cursor:pointer" onclick="invShow('${s.id}')">
+    <tbody>${l.length?l.map(s=>`<tr style="cursor:pointer" onclick="invShow('${s.id}')">
       <td class="num" style="font-weight:600">${esc(s.no||'')}</td>
       <td style="white-space:nowrap;font-size:13px">${dtm(s.ts)||dmy(s.date)}</td>
       <td>${esc(s.customer||'—')}</td>
@@ -566,13 +576,13 @@ function vInvoices(v){
       <td class="num">${+s.discount?moneyp(s.discount):'—'}</td>
       <td class="num"><b>${moneyp(s.total)}</b></td>
       <td>${s.pay==='credit'?'<span class="pill w">آجل</span>':'<span class="pill g">نقدي</span>'}</td>
-    </tr>`).join(''):`<tr><td colspan=7><div class="empty">${icon('bill',44)}<div>لا توجد فواتير في الفترة المختارة</div></div></td></tr>`}</tbody>
+    </tr>`).join(''):`<tr><td colspan=7><div class="empty">${icon('bill',44)}<div>${invLoading?'بحمّل الفواتير…':'لا توجد فواتير في الفترة المختارة'}</div></div></td></tr>`}</tbody>
   </table></div></div>
-  ${l.length>500?`<p style="color:var(--muted);font-size:12px;margin-top:10px">يعرض أحدث ٥٠٠ فاتورة — ضيّق الفترة أو ابحث للوصول للباقي.</p>`:''}`;
-  const qi=$('#q');if(qi)qi.oninput=e=>{invQ=e.target.value;clearTimeout(rT);rT=setTimeout(render,150)};
+  ${l.length>=500?`<p style="color:var(--muted);font-size:12px;margin-top:10px">يعرض أحدث ٥٠٠ فاتورة — ضيّق الفترة أو ابحث للوصول للباقي.</p>`:''}`;
+  const qi=$('#q');if(qi)qi.oninput=e=>{invQ=e.target.value;invKey=null;clearTimeout(rT);rT=setTimeout(()=>loadInvoices(),300)};
 }
 function invShow(id){
-  const s=get('sales',id);if(!s)return;
+  const s=invData.find(x=>x.id===id);if(!s)return;
   const lines=(s.lines||[]);
   const sub=s.subtotal!=null?+s.subtotal:lines.reduce((a,l)=>a+(+l.price||0)*(+l.qty||0),0);
   modal(`فاتورة #${esc(s.no||'')}`,`
