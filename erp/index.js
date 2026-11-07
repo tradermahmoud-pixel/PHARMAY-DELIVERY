@@ -149,7 +149,7 @@ app.get('/api/sync', auth, async (req, res) => {
   const since = parseInt(req.query.since, 10) || 0;
   // الفواتير والأصناف مش بتتزامن للعميل (كتير جدًا) — بتتقرى من endpoints مخصصة عشان الأداء
   const { rows } = await pool.query(
-    "SELECT col,id,data,deleted,seq FROM docs WHERE seq>$1 AND col NOT IN ('sales','items') ORDER BY seq LIMIT 20000", [since]);
+    "SELECT col,id,data,deleted,seq FROM docs WHERE seq>$1 AND col NOT IN ('sales','items','customers') ORDER BY seq LIMIT 20000", [since]);
   let seq = since;
   const docs = rows.map(r => { if (r.seq > seq) seq = Number(r.seq); return r.deleted ? { c: r.col, i: r.id, x: true } : { c: r.col, i: r.id, d: r.data }; });
   // تقديم المؤشر لتخطّي مستندات الفواتير المستبعَدة (طالما مفيش صفحة ممتلئة)
@@ -425,6 +425,69 @@ app.get('/api/stock-summary', auth, async (_req, res) => {
        ORDER BY (data->>'stock')::numeric ASC LIMIT 12`);
     res.json(Object.assign({}, s.rows[0], { low: low.rows.map(r => Object.assign({ id: r.id }, r.data)) }));
   } catch (e) { res.status(500).json({ error: 'stock', detail: e.message }); }
+});
+
+/* ---- العملاء (خادمي، على كل العملاء) — عشان الأداء مش بيتزامنوا للموبايل ---- */
+// توحيد عربي للاسم + الهاتف (نفس منطق الأصناف)
+const CUST_NORM_SQL = `lower(translate(regexp_replace(COALESCE(data->>'name','')||' '||COALESCE(data->>'phone',''), '[ًٌٍَُِّْـء]', '', 'g'), 'أإآىئؤة', 'اااييوه'))`;
+
+// ملخّص الحسابات للوحة التحكم (عدد العملاء + إجمالي ديونهم) بدون تحميل الكل
+app.get('/api/parties-summary', auth, async (_req, res) => {
+  try {
+    const { rows } = await pool.query(
+      `SELECT count(*)::int AS cust_count,
+              COALESCE(SUM(GREATEST(COALESCE(NULLIF(data->>'balance','')::numeric,0),0)),0) AS cust_debt
+       FROM docs WHERE col='customers' AND NOT deleted`);
+    res.json(rows[0]);
+  } catch (e) { res.status(500).json({ error: 'parties', detail: e.message }); }
+});
+
+// بحث/قائمة العملاء — بحث عربي ذكي بالاسم أو الهاتف، الأعلى ديونًا أولًا
+app.get('/api/customers', auth, async (req, res) => {
+  try {
+    const toks = String(req.query.q || '').trim().split(/\s+/).filter(Boolean).slice(0, 6);
+    const lim = Math.min(400, Math.max(1, parseInt(req.query.limit, 10) || 200));
+    const params = []; let where = "col='customers' AND NOT deleted";
+    toks.forEach(t => { params.push('%' + arNorm(t) + '%'); where += ` AND ${CUST_NORM_SQL} LIKE $${params.length}`; });
+    params.push(lim);
+    const { rows } = await pool.query(
+      `SELECT id,data FROM docs WHERE ${where}
+       ORDER BY GREATEST(COALESCE(NULLIF(data->>'balance','')::numeric,0),0) DESC, data->>'name' ASC
+       LIMIT $${params.length}`, params);
+    res.json(rows.map(r => Object.assign({ id: r.id }, r.data)));
+  } catch (e) { res.status(500).json({ error: 'customers', detail: e.message }); }
+});
+
+// بيع آجل: زوّد رصيد عميل بالاسم (أو أنشئه) — ذرّي، بصيغة docs + seq
+app.post('/api/customer-credit', auth, async (req, res) => {
+  const name = String(req.body && req.body.name || '').trim();
+  const amount = +(req.body && req.body.amount) || 0;
+  if (!name || amount <= 0) return res.status(400).json({ error: 'بيانات غير صحيحة' });
+  const client = await pool.connect();
+  try {
+    await client.query(`SET search_path TO "${SCHEMA}"`);
+    await client.query('BEGIN');
+    const ex = await client.query(
+      `SELECT id,data FROM docs WHERE col='customers' AND NOT deleted
+         AND lower(translate(regexp_replace(COALESCE(data->>'name',''),'[ًٌٍَُِّْـء]','','g'),'أإآىئؤة','اااييوه')) = $1
+       ORDER BY seq LIMIT 1`, [arNorm(name)]);
+    let out;
+    if (ex.rows[0]) {
+      const d = Object.assign({}, ex.rows[0].data); d.balance = (+d.balance || 0) + amount;
+      await client.query(`UPDATE docs SET data=$2, deleted=false, seq=nextval('doc_seq'), updated_at=$3, updated_by=$4 WHERE col='customers' AND id=$1`,
+        [ex.rows[0].id, d, now(), req.user.id]);
+      out = Object.assign({ id: ex.rows[0].id }, d);
+    } else {
+      const id = 'cu_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
+      const d = { name, phone: '', balance: amount, note: '' };
+      await client.query(`INSERT INTO docs(col,id,data,deleted,seq,updated_at,updated_by) VALUES('customers',$1,$2,false,nextval('doc_seq'),$3,$4)`,
+        [id, d, now(), req.user.id]);
+      out = Object.assign({ id }, d);
+    }
+    await client.query('COMMIT');
+    res.json({ ok: true, customer: out });
+  } catch (e) { await client.query('ROLLBACK').catch(() => {}); res.status(500).json({ error: 'credit', detail: e.message }); }
+  finally { client.release(); }
 });
 
 /* static + pages (served under the mount, e.g. /erp/...) */

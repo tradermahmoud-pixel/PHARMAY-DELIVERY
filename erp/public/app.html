@@ -245,7 +245,7 @@ const icon=(k,w)=>`<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" st
 
 /* ============================= data layer ============================= */
 let DB,USER,ME;
-const COLS=['purchases','customers','vendors','cash','employees','attendance','settings'];
+const COLS=['purchases','vendors','cash','employees','attendance','settings'];
 const state={}; COLS.forEach(c=>state[c]={});
 const arr=c=>Object.values(state[c]||{});
 const get=(c,id)=>state[c]&&state[c][id];
@@ -318,7 +318,9 @@ function lowItems(){return arr('items').filter(i=>(+i.min||0)>0 && itemStock(i)<
 function stockValue(){return arr('items').reduce((s,i)=>s+itemStock(i)*(+i.buy||0),0)}
 function salesBetween(from,to){return arr('sales').filter(s=>s.ts>=from&&s.ts<to)}
 function dayStart(off){const d=new Date();d.setHours(0,0,0,0);d.setDate(d.getDate()-(off||0));return d.getTime()}
-function custDebt(){return arr('customers').reduce((s,c)=>s+Math.max(0,+c.balance||0),0)}
+let partiesSum=null;
+function custDebt(){return partiesSum?(+partiesSum.cust_debt||0):0}
+function custCount(){return partiesSum?(+partiesSum.cust_count||0):0}
 function vendDebt(){return arr('vendors').reduce((s,v)=>s+Math.max(0,+v.balance||0),0)}
 function cashBalance(){return arr('cash').reduce((s,m)=>s+(m.type==='out'?-(+m.amount||0):(+m.amount||0)),0)}
 function saleProfit(s){return (s.lines||[]).reduce((p,l)=>p+((+l.price||0)-(+l.cost||0))*(+l.qty||0),0)-(+s.discount||0)}
@@ -340,8 +342,9 @@ function refreshSummary(force){
   summaryLoading=true;const B=(window.__BASE__||'');
   Promise.all([
     fetch(B+'/api/sales-summary',{credentials:'same-origin'}).then(r=>r.ok?r.json():null).catch(()=>null),
-    fetch(B+'/api/stock-summary',{credentials:'same-origin'}).then(r=>r.ok?r.json():null).catch(()=>null)
-  ]).then(([s,st])=>{if(s)salesSummary=s;if(st)stockSum=st;summaryAt=Date.now();if(route==='dash'){const vv=$('#view');if(vv)vDash(vv);}})
+    fetch(B+'/api/stock-summary',{credentials:'same-origin'}).then(r=>r.ok?r.json():null).catch(()=>null),
+    fetch(B+'/api/parties-summary',{credentials:'same-origin'}).then(r=>r.ok?r.json():null).catch(()=>null)
+  ]).then(([s,st,ps])=>{if(s)salesSummary=s;if(st)stockSum=st;if(ps)partiesSum=ps;summaryAt=Date.now();if(route==='dash'){const vv=$('#view');if(vv)vDash(vv);}})
     .finally(()=>{summaryLoading=false});
 }
 function vDash(v){
@@ -524,10 +527,16 @@ function renderPOS(){
       <button class="${payType==='cash'?'on':''}" onclick="payType='cash';renderPOS()">نقدي</button>
       <button class="${payType==='credit'?'on':''}" onclick="payType='credit';renderPOS()">آجل (عميل)</button>
     </div>
-    ${payType==='credit'?`<label class="fld"><span>العميل</span><input id="poscust" list="clist" value="${esc(posCust)}" placeholder="اسم العميل" onchange="posCust=this.value"><datalist id="clist">${arr('customers').map(c=>`<option>${esc(c.name)}</option>`).join('')}</datalist></label>`:''}
+    ${payType==='credit'?`<label class="fld"><span>العميل</span><input id="poscust" list="clist" value="${esc(posCust)}" placeholder="اسم العميل" autocomplete="off" oninput="posCust=this.value;posCustSearch(this.value)"><datalist id="clist"></datalist></label>`:''}
     <button class="btn pri" style="width:100%;justify-content:center;padding:13px;font-size:16px" onclick="checkout()" ${cart.length?'':'disabled'}>${icon('chk')} إتمام البيع — ${moneyp(tot)}</button>
   </div>`;
 }
+let posCustT=null;
+function posCustSearch(q){clearTimeout(posCustT);posCustT=setTimeout(()=>{
+  const s=(q||'').trim();if(s.length<2)return;
+  fetch((window.__BASE__||'')+'/api/customers?limit=12&q='+encodeURIComponent(s),{credentials:'same-origin'})
+    .then(r=>r.ok?r.json():[]).then(list=>{const dl=document.getElementById('clist');if(dl)dl.innerHTML=(list||[]).map(c=>`<option value="${esc(c.name)}">${esc(c.phone||'')}</option>`).join('')}).catch(()=>{});
+},250)}
 function checkout(){
   if(!cart.length)return;
   const sub=cart.reduce((s,c)=>s+c.price*c.qty,0), tot=Math.max(0,sub-(+posDisc||0));
@@ -543,10 +552,9 @@ function checkout(){
   if(payType==='cash'){
     save('cash',uid('cx'),{date:todayStr(),ts,type:'in',amount:tot,reason:'بيع فاتورة #'+no,ref:id});
   }else{
-    // customer credit
-    let c=arr('customers').find(x=>x.name===custName);
-    if(c)patch('customers',c.id,{balance:(+c.balance||0)+tot});
-    else save('customers',uid('cu'),{name:custName,phone:'',balance:tot,note:''});
+    // بيع آجل: تزويد رصيد العميل على الخادم (أو إنشاؤه) — بدون تحميل كل العملاء
+    fetch((window.__BASE__||'')+'/api/customer-credit',{method:'POST',credentials:'same-origin',headers:{'Content-Type':'application/json'},body:JSON.stringify({name:custName,amount:tot})})
+      .then(()=>{if(route==='dash'||route==='cust')refreshSummary(true)}).catch(()=>{});
   }
   toast('تم حفظ الفاتورة #'+no,'ok');
   const saved={...sale,id};
@@ -792,49 +800,47 @@ async function loadDelivClients(){
   catch(e){if(delivClients===null)delivClients=[];}
   delivByPhone={};(delivClients||[]).forEach(c=>(c.phones||[]).forEach(p=>{const k=normP(p);if(k&&!delivByPhone[k])delivByPhone[k]=c;}));
 }
-function vCust(v){
-  if(delivClients===null){loadDelivClients().then(()=>{if(route==='cust')vCust($('#view'))});}
-  const q=cvQ.toLowerCase();
-  let gen=arr('customers').sort((a,b)=>(a.name||'').localeCompare(b.name||'','ar'));
-  // phones of Genius customers (to find delivery-only)
-  const genPhones=new Set();gen.forEach(c=>{const k=normP(c.phone);if(k)genPhones.add(k)});
-  let delivOnly=(delivClients||[]).filter(c=>!(c.phones||[]).some(p=>genPhones.has(normP(p))));
-  if(q){gen=gen.filter(x=>(x.name||'').toLowerCase().includes(q)||(x.phone||'').includes(q));
-        delivOnly=delivOnly.filter(x=>(x.name||'').toLowerCase().includes(q)||(x.phones||[]).some(p=>p.includes(q)));}
+/* العملاء: بحث خادمي ذكي على كل العملاء (مش بيتحمّلوا كلهم للموبايل) */
+let custData=[], custLoading=false, custT=null;
+function custById(id){return custData.find(x=>x.id===id)}
+function loadCust(){
+  custLoading=true;const tb=$('#custbody');if(tb&&!custData.length)renderCustRows();
+  const u=(window.__BASE__||'')+'/api/customers?limit=200&q='+encodeURIComponent(cvQ.trim());
+  fetch(u,{credentials:'same-origin'}).then(r=>r.ok?r.json():[]).then(j=>{custData=Array.isArray(j)?j:[];})
+    .catch(()=>{custData=[];}).finally(()=>{custLoading=false;renderCustRows();});
+}
+function renderCustRows(){
+  const tb=$('#custbody');if(!tb)return;
   const match=c=>{const k=normP(c.phone);return k?delivByPhone[k]:null};
+  tb.innerHTML=custData.length?custData.map(x=>{const bal=+x.balance||0;const m=match(x);return `<tr>
+    <td style="font-weight:600">${esc(x.name)}</td>
+    <td class="num" dir="ltr" style="text-align:right">${esc(x.phone||'—')}</td>
+    <td class="num">${bal>0?`<span class="pill w">${moneyp(bal)}</span>`:bal<0?`<span class="pill g">${moneyp(-bal)} مقدم</span>`:'<span class="pill n">صفر</span>'}</td>
+    <td class="num">${m?`<span class="pill n">${num(m.orders_count||0)} طلب</span>`:'—'}</td>
+    <td>${m?'<span class="pill g">صيدلية + توصيل</span>':'<span class="pill n">صيدلية</span>'}</td>
+    <td><div class="act">
+      <button class="btn sm" onclick="partyPay('customers','${x.id}')">تحصيل</button>
+      <button class="ib" onclick="partyEdit('customers','${x.id}')">${icon('edit')}</button>
+      <button class="ib dng" onclick="partyDel('customers','${x.id}')">${icon('trash')}</button>
+    </div></td></tr>`}).join(''):`<tr><td colspan=6><div class="empty">${icon('users',44)}<div>${custLoading?'بحمّل…':(cvQ.trim()?'لا نتائج':'ابحث عن عميل بالاسم أو الهاتف')}</div></div></td></tr>`;
+}
+function vCust(v){
+  if(delivClients===null){loadDelivClients().then(()=>{if(route==='cust')renderCustRows()});}
   v.innerHTML=`
   <div class="kpis" style="grid-template-columns:repeat(auto-fill,minmax(160px,1fr))">
-    <div class="kpi"><div class="t">${icon('users')} عملاء الصيدلية</div><div class="v">${num(arr('customers').length)}</div></div>
-    <div class="kpi"><div class="t">${icon('truck')} عملاء التوصيل فقط</div><div class="v">${num((delivClients||[]).filter(c=>!(c.phones||[]).some(p=>genPhones.has(normP(p)))).length)}</div></div>
-    <div class="kpi"><div class="t">${icon('users')} ديون العملاء</div><div class="v">${money(custDebt())}</div></div>
+    <div class="kpi"><div class="t">${icon('users')} عملاء الصيدلية</div><div class="v">${num(custCount())}</div></div>
+    <div class="kpi"><div class="t">${icon('truck')} عملاء التوصيل</div><div class="v">${num((delivClients||[]).length)}</div></div>
+    <div class="kpi"><div class="t">${icon('users')} ديون العملاء</div><div class="v">${money(custDebt())}</div><div class="s">مستحق لنا</div></div>
   </div>
   <div class="sbar"><div class="search">${icon('search')}<input id="q" placeholder="بحث بالاسم أو الهاتف…" value="${esc(cvQ)}"></div>
     <button class="btn pri" onclick="partyEdit('customers')">${icon('plus')} عميل جديد</button></div>
   <div class="card"><div class="tbl-wrap"><table class="tbl">
     <thead><tr><th>الاسم</th><th>الهاتف</th><th>الرصيد</th><th>التوصيل</th><th>المصدر</th><th></th></tr></thead>
-    <tbody>${gen.length||delivOnly.length?[
-      ...gen.map(x=>{const bal=+x.balance||0;const m=match(x);return `<tr>
-        <td style="font-weight:600">${esc(x.name)}</td>
-        <td class="num" dir="ltr" style="text-align:right">${esc(x.phone||'—')}</td>
-        <td class="num">${bal>0?`<span class="pill w">${moneyp(bal)}</span>`:bal<0?`<span class="pill g">${moneyp(-bal)} مقدم</span>`:'<span class="pill n">صفر</span>'}</td>
-        <td class="num">${m?`<span class="pill n">${num(m.orders_count||0)} طلب</span>`:'—'}</td>
-        <td>${m?'<span class="pill g">صيدلية + توصيل</span>':'<span class="pill n">صيدلية</span>'}</td>
-        <td><div class="act">
-          <button class="btn sm" onclick="partyPay('customers','${x.id}')">تحصيل</button>
-          <button class="ib" onclick="partyEdit('customers','${x.id}')">${icon('edit')}</button>
-          <button class="ib dng" onclick="partyDel('customers','${x.id}')">${icon('trash')}</button>
-        </div></td></tr>`}).join(''),
-      ...delivOnly.map(c=>`<tr style="background:color-mix(in srgb,var(--brand) 4%,transparent)">
-        <td style="font-weight:600">${esc(c.name||'—')}</td>
-        <td class="num" dir="ltr" style="text-align:right">${esc((c.phones||[])[0]||'—')}</td>
-        <td class="num"><span class="pill n">—</span></td>
-        <td class="num"><span class="pill n">${num(c.orders_count||0)} طلب</span></td>
-        <td><span class="pill w">توصيل فقط</span></td>
-        <td></td></tr>`).join('')
-    ].join(''):`<tr><td colspan=6><div class="empty">${icon('users',44)}<div>لا يوجد عملاء</div></div></td></tr>`}</tbody>
+    <tbody id="custbody"></tbody>
   </table></div></div>
-  <p style="color:var(--muted);font-size:12px;margin-top:10px">العملاء من الصيدلية (Genius) والتوصيل متطابقين بالهاتف · «توصيل فقط» = موجود في برنامج التوصيل ومش مسجّل في Genius</p>`;
-  const qi=$('#q');if(qi)qi.oninput=e=>{cvQ=e.target.value;clearTimeout(rT);rT=setTimeout(()=>vCust(v),150)};
+  <p style="color:var(--muted);font-size:12px;margin-top:10px">بحث لحظي على كل العملاء (بيتعامل مع الهمزات والتشكيل) · الأعلى ديونًا بيظهروا أول · علامة «صيدلية + توصيل» معناها العميل متطابق بالهاتف مع برنامج التوصيل</p>`;
+  renderCustRows();refreshSummary();loadCust();
+  const qi=$('#q');if(qi)qi.oninput=e=>{cvQ=e.target.value;clearTimeout(custT);custT=setTimeout(loadCust,200)};
 }
 function vVend(v){partyView(v,'vendors','المورد','مورد','vend')}
 function partyView(v,col,label,labelN,route){
@@ -861,8 +867,10 @@ function partyView(v,col,label,labelN,route){
   </table></div></div>`;
   const qi=$('#q');if(qi)qi.oninput=e=>{cvQ=e.target.value;clearTimeout(rT);rT=setTimeout(()=>partyView(v,col,label,labelN,route),120)};
 }
+function partyGet(col,id){return col==='customers'?(custById(id)||{}):get(col,id)}
+function custRefresh(){loadCust();refreshSummary(true)}
 function partyEdit(col,id){
-  const x=id?get(col,id):{};const isCust=col==='customers';
+  const x=id?partyGet(col,id):{};const isCust=col==='customers';
   modal(id?'تعديل':(isCust?'عميل جديد':'مورد جديد'),`
     <label class="fld"><span>الاسم *</span><input id="f_name" value="${esc(x.name||'')}"></label>
     <div class="row">
@@ -873,25 +881,27 @@ function partyEdit(col,id){
   `,id?'حفظ':'إضافة',()=>{
     const name=fval('f_name');if(!name)return toast('اكتب الاسم','err');
     const d={name,phone:fval('f_phone'),balance:fnum('f_bal'),note:fval('f_note')};
-    if(id)patch(col,id,d);else save(col,uid(col[0]+'_'),d);
+    const p=id?patch(col,id,d):save(col,uid(col[0]+'_'),d);
+    if(col==='customers'&&p&&p.then)p.then(custRefresh);
     closeModal();toast('تم الحفظ','ok');
   });
 }
 function partyPay(col,id){
-  const x=get(col,id);const isCust=col==='customers';
+  const x=partyGet(col,id);const isCust=col==='customers';
   modal((isCust?'تحصيل من ':'سداد إلى ')+esc(x.name),`
     <div style="color:var(--muted);margin-bottom:12px">الرصيد الحالي: <b style="color:var(--ink)">${moneyp(x.balance)}</b></div>
     <label class="fld"><span>المبلغ</span><input id="f_amt" type="number" step="0.01" inputmode="decimal" autofocus></label>
     <label class="fld"><span>ملاحظة</span><input id="f_note" placeholder="${isCust?'تحصيل دفعة':'سداد دفعة'}"></label>
   `,'تسجيل',()=>{
     const amt=fnum('f_amt');if(amt<=0)return toast('أدخل مبلغاً','err');
-    patch(col,id,{balance:(+x.balance||0)-amt});
+    const p=patch(col,id,{balance:(+x.balance||0)-amt});
+    if(col==='customers'&&p&&p.then)p.then(custRefresh);
     const ts=Date.now();
     save('cash',uid('cx'),{date:todayStr(),ts,type:isCust?'in':'out',amount:amt,reason:(isCust?'تحصيل من ':'سداد إلى ')+x.name+(fval('f_note')?' — '+fval('f_note'):''),ref:id});
     closeModal();toast('تم التسجيل','ok');
   });
 }
-function partyDel(col,id){const x=get(col,id);confirmDel(`حذف «${esc(x.name)}»؟`,()=>{del(col,id);toast('تم الحذف','ok')})}
+function partyDel(col,id){const x=partyGet(col,id);confirmDel(`حذف «${esc(x.name)}»؟`,()=>{const p=del(col,id);if(col==='customers'&&p&&p.then)p.then(custRefresh);toast('تم الحذف','ok')})}
 
 /* ---------- Cash (الخزنة) ---------- */
 let cashF='all';
