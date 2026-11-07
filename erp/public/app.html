@@ -630,15 +630,33 @@ function invShow(id){
 }
 
 /* ---------- Delivery (طلبات التوصيل — من برنامج التوصيل) ---------- */
-let delivOrders=null, delivTimer=null, delivStatus='all';
+let delivOrders=null, delivTimer=null, delivStatus='all', delivDays=3, delivDate='', delivDrivers=[];
 const DSTAT={new:['جديد','n'],ready:['جاهز','w'],out:['مع المندوب','accent'],done:['تم التوصيل','g'],cancel:['ملغي','r']};
+const DAYSEG=[[1,'اليوم'],[3,'٣ أيام'],[7,'٧ أيام'],[30,'شهر']];
 async function loadDeliv(){
-  try{const r=await fetch((window.__BASE__||'')+'/api/delivery-orders',{credentials:'same-origin'});
-    if(!r.ok)throw 0; delivOrders=await r.json();}
+  try{const u=(window.__BASE__||'')+'/api/delivery-orders?'+(delivDate?('date='+delivDate):('days='+delivDays));
+    const r=await fetch(u,{credentials:'same-origin'});if(!r.ok)throw 0; delivOrders=await r.json();}
   catch(e){ if(delivOrders===null) delivOrders=[]; }
+}
+async function loadDrivers(){
+  try{const r=await fetch((window.__BASE__||'')+'/api/drivers',{credentials:'same-origin'});if(r.ok)delivDrivers=await r.json();}catch(e){}
+}
+function delivRepaint(){loadDeliv().then(()=>{if(route==='delivery')renderDeliv($('#view'))})}
+function delivAssign(orderId,driverId){
+  fetch((window.__BASE__||'')+'/api/delivery-assign',{method:'POST',credentials:'same-origin',headers:{'Content-Type':'application/json'},body:JSON.stringify({orderId:orderId,driverId:driverId||null})})
+    .then(r=>r.json()).then(j=>{if(j&&j.ok){toast('تم تعيين المندوب','ok');delivRepaint();}else toast((j&&j.error)||'تعذّر التعيين','err');})
+    .catch(()=>toast('تعذّر التعيين','err'));
+}
+function delivStatusAct(orderId,status){
+  let driverId=null;
+  if(status==='out'){const sel=document.getElementById('drv'+orderId);driverId=sel?sel.value:'';if(!driverId){toast('اختار المندوب الأول','err');return;}}
+  fetch((window.__BASE__||'')+'/api/delivery-status',{method:'POST',credentials:'same-origin',headers:{'Content-Type':'application/json'},body:JSON.stringify({orderId,status,driverId:driverId||null})})
+    .then(r=>r.json()).then(j=>{if(j&&j.ok){toast('تم','ok');delivRepaint();}else toast((j&&j.error)||'تعذّر','err');})
+    .catch(()=>toast('تعذّر','err'));
 }
 function vDelivery(v){
   if(delivTimer){clearInterval(delivTimer);delivTimer=null;}
+  if(!delivDrivers.length)loadDrivers();
   const paint=()=>{if(route==='delivery'){const vv=$('#view');if(vv)renderDeliv(vv);}};
   renderDeliv(v);
   loadDeliv().then(paint);
@@ -651,34 +669,45 @@ function renderDeliv(v){
   const cnt=s=>delivOrders.filter(o=>o.status===s).length;
   const active=delivOrders.filter(o=>['new','ready','out'].includes(o.status)).length;
   const money2=n=>num(n)+' ج.م';
+  const drvOpts=o=>`<option value="">— مندوب —</option>`+delivDrivers.map(d=>`<option value="${d.id}" ${o.driver_id===d.id?'selected':''}>${esc(d.name)}</option>`).join('');
   v.innerHTML=`
   <div class="kpis" style="grid-template-columns:repeat(auto-fill,minmax(150px,1fr))">
     <div class="kpi accent"><div class="t">${icon('truck')} طلبات شغّالة</div><div class="v">${num(active)}</div><div class="s">جديد/جاهز/مع المندوب</div></div>
-    <div class="kpi"><div class="t">تم التوصيل اليوم</div><div class="v" style="color:var(--ok)">${num(cnt('done'))}</div></div>
-    <div class="kpi"><div class="t">إجمالي قيمة الطلبات الشغّالة</div><div class="v">${money(delivOrders.filter(o=>['new','ready','out'].includes(o.status)).reduce((s,o)=>s+(+o.amount||0),0))}</div></div>
+    <div class="kpi"><div class="t">تم التوصيل</div><div class="v" style="color:var(--ok)">${num(cnt('done'))}</div></div>
+    <div class="kpi"><div class="t">قيمة الطلبات الشغّالة</div><div class="v">${money(delivOrders.filter(o=>['new','ready','out'].includes(o.status)).reduce((s,o)=>s+(+o.amount||0),0))}</div></div>
   </div>
   <div class="sbar">
-    <div class="seg" style="max-width:520px;flex-wrap:wrap">
+    <div class="seg" style="max-width:320px">${DAYSEG.map(d=>`<button class="${!delivDate&&delivDays===d[0]?'on':''}" onclick="delivDate='';delivDays=${d[0]};delivRepaint()">${d[1]}</button>`).join('')}</div>
+    <label class="fld" style="margin:0;display:flex;align-items:center;gap:6px"><span style="margin:0;font-size:12.5px">تاريخ محدد:</span><input type="date" value="${esc(delivDate)}" onchange="delivDate=this.value;delivRepaint()" style="width:auto;padding:7px 10px"></label>
+    ${delivDate?`<button class="btn sm gho" onclick="delivDate='';delivRepaint()">مسح التاريخ</button>`:''}
+    <div class="sp" style="flex:1"></div>
+    <button class="btn sm" onclick="delivRepaint()">${icon('chk')} تحديث</button>
+  </div>
+  <div class="sbar">
+    <div class="seg" style="max-width:640px;flex-wrap:wrap">
       <button class="${delivStatus==='all'?'on':''}" onclick="delivStatus='all';renderDeliv($('#view'))">الكل (${delivOrders.length})</button>
       ${Object.keys(DSTAT).map(s=>`<button class="${delivStatus===s?'on':''}" onclick="delivStatus='${s}';renderDeliv($('#view'))">${DSTAT[s][0]} (${cnt(s)})</button>`).join('')}
     </div>
-    <div class="sp" style="flex:1"></div>
-    <button class="btn sm" onclick="loadDeliv().then(()=>renderDeliv($('#view')))">${icon('chk')} تحديث</button>
   </div>
   <div class="card"><div class="tbl-wrap"><table class="tbl">
-    <thead><tr><th>#</th><th>العميل</th><th>الهاتف</th><th>العنوان</th><th>الأصناف</th><th>القيمة</th><th>المندوب</th><th>الحالة</th></tr></thead>
-    <tbody>${l.length?l.map(o=>{const st=DSTAT[o.status]||['—','n'];return `<tr>
+    <thead><tr><th>#</th><th>العميل / الوقت</th><th>الهاتف</th><th>العنوان</th><th>الأصناف</th><th>القيمة / الدفع</th><th>المندوب</th><th>الحالة / إجراء</th></tr></thead>
+    <tbody>${l.length?l.map(o=>{const st=DSTAT[o.status]||['—','n'];const open=['new','ready','out'].includes(o.status);return `<tr>
       <td class="num" style="font-weight:600">${esc(o.no||'')}</td>
-      <td>${esc(o.customer||'—')}</td>
+      <td><div style="font-weight:600">${esc(o.customer||'—')}</div><div style="font-size:11px;color:var(--muted)">${dtm(o.created_at)}${o.promise_min?` · وعد ${num(o.promise_min)}د`:''}</div></td>
       <td class="num" dir="ltr" style="text-align:right;font-size:13px">${esc(o.phone||'—')}</td>
-      <td style="max-width:200px;font-size:13px;color:var(--muted)">${esc((o.address||'').slice(0,60))}</td>
-      <td style="max-width:220px;font-size:13px">${esc((o.items||'').slice(0,70))}</td>
-      <td class="num"><b>${money2(o.amount)}</b></td>
-      <td>${o.driver?esc(o.driver):'<span class="pill w">لسه متحددش</span>'}</td>
-      <td><span class="pill ${st[1]}">${st[0]}</span></td>
-    </tr>`}).join(''):`<tr><td colspan=8><div class="empty">${icon('truck',44)}<div>لا طلبات في الحالة دي</div></div></td></tr>`}</tbody>
+      <td style="max-width:180px;font-size:13px;color:var(--muted)">${esc((o.address||'').slice(0,70))}${o.area?`<div style="font-size:11px">${esc(o.area)}</div>`:''}</td>
+      <td style="max-width:230px;font-size:13px">${esc((o.items||'').slice(0,90))}</td>
+      <td class="num"><b>${money2(o.amount)}</b>${o.payment?`<div style="font-size:11.5px;color:var(--muted)">${esc(o.payment)}</div>`:''}</td>
+      <td>${open?`<select id="drv${o.id}" onchange="delivAssign(${o.id},this.value)" style="padding:6px 8px;font-size:13px;max-width:140px;border-radius:8px">${drvOpts(o)}</select>`:(o.driver?esc(o.driver):'—')}</td>
+      <td><div style="display:flex;flex-direction:column;gap:5px;align-items:flex-start">
+        <span class="pill ${st[1]}">${st[0]}</span>
+        ${o.status==='new'||o.status==='ready'?`<button class="btn sm pri" style="padding:4px 9px" onclick="delivStatusAct(${o.id},'out')">🛵 جاهز للتوصيل</button>`:''}
+        ${o.status==='out'?`<button class="btn sm" style="padding:4px 9px;color:var(--ok);border-color:color-mix(in srgb,var(--ok) 35%,var(--line))" onclick="delivStatusAct(${o.id},'done')">${icon('chk')} تم التوصيل</button>`:''}
+        ${open?`<button class="btn sm gho dng" style="padding:3px 8px;font-size:12px" onclick="delivStatusAct(${o.id},'cancel')">إلغاء</button>`:''}
+      </div></td>
+    </tr>`}).join(''):`<tr><td colspan=8><div class="empty">${icon('truck',44)}<div>لا طلبات في الفترة/الحالة دي</div></div></td></tr>`}</tbody>
   </table></div></div>
-  <p style="color:var(--muted);font-size:12px;margin-top:10px">بيتحدّث تلقائيًا كل ٢٠ ثانية · طلبات آخر ٣ أيام · تعيين المندوب بيتم من برنامج التوصيل</p>`;
+  <p style="color:var(--muted);font-size:12px;margin-top:10px">بيتحدّث كل ٢٠ ثانية · اختار المندوب واضغط «جاهز للتوصيل» لإخراج الطلب · التغييرات بتظهر في برنامج التوصيل كمان</p>`;
 }
 
 /* ---------- Purchases ---------- */

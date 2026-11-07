@@ -310,14 +310,73 @@ app.get('/api/delivery-clients', auth, async (req, res) => {
 /* ---- تكامل: قراءة طلبات التوصيل من قاعدة الدليفري (نفس القاعدة، سكيمة public) ---- */
 app.get('/api/delivery-orders', auth, async (req, res) => {
   try {
+    const date = String(req.query.date || '').trim();
+    let where, params = [];
+    if (/^\d{4}-\d{2}-\d{2}$/.test(date)) { where = 'o.day = $1'; params = [date]; }
+    else { const days = Math.min(120, Math.max(1, parseInt(req.query.days, 10) || 3)); where = 'o.day >= (CURRENT_DATE - $1::int)'; params = [days]; }
     const { rows } = await pool.query(
-      `SELECT o.id, o.no, o.day, o.customer, o.phone, o.address, o.items, o.amount,
-              o.status, o.source, o.created_at, o.out_at, o.delivered_at, d.name AS driver
+      `SELECT o.id, o.no, o.day, o.customer, o.phone, o.address, o.area, o.items, o.amount, o.payment,
+              o.status, o.source, o.promise_min, o.created_at, o.out_at, o.delivered_at, o.driver_id, d.name AS driver
        FROM public.orders o LEFT JOIN public.users d ON d.id = o.driver_id
-       WHERE o.day >= (CURRENT_DATE - INTERVAL '3 days')
-       ORDER BY o.created_at DESC LIMIT 600`);
+       WHERE ${where} ORDER BY o.created_at DESC LIMIT 800`, params);
     res.json(rows);
   } catch (e) { res.status(500).json({ error: 'delivery', detail: e.message }); }
+});
+
+// تغيير حالة طلب توصيل من الصيدلية (جاهز للتوصيل / تم / إلغاء) — متوافق مع منطق الدليفري
+app.post('/api/delivery-status', auth, async (req, res) => {
+  try {
+    const orderId = parseInt(req.body && req.body.orderId, 10);
+    const status = String(req.body && req.body.status || '');
+    const driverId = (req.body && req.body.driverId) ? parseInt(req.body.driverId, 10) : null;
+    if (!orderId) return res.status(400).json({ error: 'طلب غير صحيح' });
+    const cur = await pool.query(`SELECT driver_id, status FROM public.orders WHERE id=$1`, [orderId]);
+    if (!cur.rows[0]) return res.status(404).json({ error: 'الأوردر مش موجود' });
+    let sql, params, note;
+    if (status === 'out') {
+      const drv = driverId || cur.rows[0].driver_id;
+      if (!drv) return res.status(400).json({ error: 'اختار المندوب الأول' });
+      const d = await pool.query(`SELECT id FROM public.users WHERE id=$1 AND role='driver' AND active`, [drv]);
+      if (!d.rows[0]) return res.status(400).json({ error: 'الطيار مش موجود' });
+      sql = `UPDATE public.orders SET driver_id=$2, status='out', out_at=COALESCE(out_at,now()), updated_at=now() WHERE id=$1`; params = [orderId, drv]; note = 'خروج للتوصيل من الصيدلية';
+    } else if (status === 'ready') { sql = `UPDATE public.orders SET status='ready', ready_at=now(), updated_at=now() WHERE id=$1`; params = [orderId]; note = 'تجهيز من الصيدلية';
+    } else if (status === 'done') { sql = `UPDATE public.orders SET status='done', delivered_at=now(), updated_at=now() WHERE id=$1`; params = [orderId]; note = 'تم التوصيل من الصيدلية';
+    } else if (status === 'cancel') { sql = `UPDATE public.orders SET status='cancel', updated_at=now() WHERE id=$1`; params = [orderId]; note = 'إلغاء من الصيدلية';
+    } else return res.status(400).json({ error: 'حالة غير معروفة' });
+    await pool.query(sql, params);
+    await pool.query(`INSERT INTO public.order_changes(order_id,user_id,kind,fields,note) VALUES ($1,NULL,'status',$2,$3)`,
+      [orderId, JSON.stringify({ status: [cur.rows[0].status, status === 'out' ? 'out' : status] }), note]).catch(() => {});
+    res.json({ ok: true });
+  } catch (e) { res.status(500).json({ error: 'status', detail: e.message }); }
+});
+
+// قائمة المندوبين (من قاعدة الدليفري)
+app.get('/api/drivers', auth, async (_req, res) => {
+  try {
+    const { rows } = await pool.query(`SELECT id, name FROM public.users WHERE role='driver' AND active ORDER BY name`);
+    res.json(rows);
+  } catch (e) { res.status(500).json({ error: 'drivers', detail: e.message }); }
+});
+
+// تعيين مندوب لطلب توصيل (متوافق مع منطق الدليفري + تسجيل في order_changes)
+app.post('/api/delivery-assign', auth, async (req, res) => {
+  try {
+    const orderId = parseInt(req.body && req.body.orderId, 10);
+    const driverId = (req.body && req.body.driverId) ? parseInt(req.body.driverId, 10) : null;
+    if (!orderId) return res.status(400).json({ error: 'طلب غير صحيح' });
+    if (driverId) {
+      const d = await pool.query(`SELECT id FROM public.users WHERE id=$1 AND role='driver' AND active`, [driverId]);
+      if (!d.rows[0]) return res.status(400).json({ error: 'الطيار مش موجود' });
+    }
+    const cur = await pool.query(`SELECT driver_id, status FROM public.orders WHERE id=$1`, [orderId]);
+    if (!cur.rows[0]) return res.status(404).json({ error: 'الأوردر مش موجود' });
+    if (['done', 'cancel'].includes(cur.rows[0].status)) return res.status(400).json({ error: 'الأوردر خلص' });
+    await pool.query(`UPDATE public.orders SET driver_id=$2, updated_at=now() WHERE id=$1`, [orderId, driverId]);
+    await pool.query(
+      `INSERT INTO public.order_changes(order_id,user_id,kind,fields,note) VALUES ($1,NULL,'edit',$2,'تعيين مندوب من الصيدلية')`,
+      [orderId, JSON.stringify({ driver_id: [cur.rows[0].driver_id, driverId] })]);
+    res.json({ ok: true });
+  } catch (e) { res.status(500).json({ error: 'assign', detail: e.message }); }
 });
 
 /* ---- بحث الأصناف الذكي (خادمي، على كل الأصناف) + قائمة + ملخّص مخزون ---- */
