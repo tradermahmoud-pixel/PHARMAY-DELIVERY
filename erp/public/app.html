@@ -720,7 +720,58 @@ function purchDel(id){const p=get('purchases',id);confirmDel(`حذف فاتور�
 
 /* ---------- Customers & Vendors (shared) ---------- */
 let cvQ='';
-function vCust(v){partyView(v,'customers','العميل','عميل','cust')}
+/* عملاء موحّدين: Genius + عملاء التوصيل (بالهاتف) */
+let delivClients=null, delivByPhone={};
+function normP(p){const d=String(p||'').replace(/\D/g,'');return d.length>=10?d.slice(-10):''}
+async function loadDelivClients(){
+  try{const r=await fetch((window.__BASE__||'')+'/api/delivery-clients',{credentials:'same-origin'});if(!r.ok)throw 0;delivClients=await r.json();}
+  catch(e){if(delivClients===null)delivClients=[];}
+  delivByPhone={};(delivClients||[]).forEach(c=>(c.phones||[]).forEach(p=>{const k=normP(p);if(k&&!delivByPhone[k])delivByPhone[k]=c;}));
+}
+function vCust(v){
+  if(delivClients===null){loadDelivClients().then(()=>{if(route==='cust')vCust($('#view'))});}
+  const q=cvQ.toLowerCase();
+  let gen=arr('customers').sort((a,b)=>(a.name||'').localeCompare(b.name||'','ar'));
+  // phones of Genius customers (to find delivery-only)
+  const genPhones=new Set();gen.forEach(c=>{const k=normP(c.phone);if(k)genPhones.add(k)});
+  let delivOnly=(delivClients||[]).filter(c=>!(c.phones||[]).some(p=>genPhones.has(normP(p))));
+  if(q){gen=gen.filter(x=>(x.name||'').toLowerCase().includes(q)||(x.phone||'').includes(q));
+        delivOnly=delivOnly.filter(x=>(x.name||'').toLowerCase().includes(q)||(x.phones||[]).some(p=>p.includes(q)));}
+  const match=c=>{const k=normP(c.phone);return k?delivByPhone[k]:null};
+  v.innerHTML=`
+  <div class="kpis" style="grid-template-columns:repeat(auto-fill,minmax(160px,1fr))">
+    <div class="kpi"><div class="t">${icon('users')} عملاء الصيدلية</div><div class="v">${num(arr('customers').length)}</div></div>
+    <div class="kpi"><div class="t">${icon('truck')} عملاء التوصيل فقط</div><div class="v">${num((delivClients||[]).filter(c=>!(c.phones||[]).some(p=>genPhones.has(normP(p)))).length)}</div></div>
+    <div class="kpi"><div class="t">${icon('users')} ديون العملاء</div><div class="v">${money(custDebt())}</div></div>
+  </div>
+  <div class="sbar"><div class="search">${icon('search')}<input id="q" placeholder="بحث بالاسم أو الهاتف…" value="${esc(cvQ)}"></div>
+    <button class="btn pri" onclick="partyEdit('customers')">${icon('plus')} عميل جديد</button></div>
+  <div class="card"><div class="tbl-wrap"><table class="tbl">
+    <thead><tr><th>الاسم</th><th>الهاتف</th><th>الرصيد</th><th>التوصيل</th><th>المصدر</th><th></th></tr></thead>
+    <tbody>${gen.length||delivOnly.length?[
+      ...gen.map(x=>{const bal=+x.balance||0;const m=match(x);return `<tr>
+        <td style="font-weight:600">${esc(x.name)}</td>
+        <td class="num" dir="ltr" style="text-align:right">${esc(x.phone||'—')}</td>
+        <td class="num">${bal>0?`<span class="pill w">${moneyp(bal)}</span>`:bal<0?`<span class="pill g">${moneyp(-bal)} مقدم</span>`:'<span class="pill n">صفر</span>'}</td>
+        <td class="num">${m?`<span class="pill n">${num(m.orders_count||0)} طلب</span>`:'—'}</td>
+        <td>${m?'<span class="pill g">صيدلية + توصيل</span>':'<span class="pill n">صيدلية</span>'}</td>
+        <td><div class="act">
+          <button class="btn sm" onclick="partyPay('customers','${x.id}')">تحصيل</button>
+          <button class="ib" onclick="partyEdit('customers','${x.id}')">${icon('edit')}</button>
+          <button class="ib dng" onclick="partyDel('customers','${x.id}')">${icon('trash')}</button>
+        </div></td></tr>`}).join(''),
+      ...delivOnly.map(c=>`<tr style="background:color-mix(in srgb,var(--brand) 4%,transparent)">
+        <td style="font-weight:600">${esc(c.name||'—')}</td>
+        <td class="num" dir="ltr" style="text-align:right">${esc((c.phones||[])[0]||'—')}</td>
+        <td class="num"><span class="pill n">—</span></td>
+        <td class="num"><span class="pill n">${num(c.orders_count||0)} طلب</span></td>
+        <td><span class="pill w">توصيل فقط</span></td>
+        <td></td></tr>`).join('')
+    ].join(''):`<tr><td colspan=6><div class="empty">${icon('users',44)}<div>لا يوجد عملاء</div></div></td></tr>`}</tbody>
+  </table></div></div>
+  <p style="color:var(--muted);font-size:12px;margin-top:10px">العملاء من الصيدلية (Genius) والتوصيل متطابقين بالهاتف · «توصيل فقط» = موجود في برنامج التوصيل ومش مسجّل في Genius</p>`;
+  const qi=$('#q');if(qi)qi.oninput=e=>{cvQ=e.target.value;clearTimeout(rT);rT=setTimeout(()=>vCust(v),150)};
+}
 function vVend(v){partyView(v,'vendors','المورد','مورد','vend')}
 function partyView(v,col,label,labelN,route){
   const q=cvQ.toLowerCase();

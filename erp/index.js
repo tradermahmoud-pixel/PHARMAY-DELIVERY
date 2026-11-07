@@ -242,6 +242,18 @@ app.post('/api/ingest', async (req, res) => {
   } finally { client.release(); }
 });
 
+/* ---- تكامل: قراءة عملاء التوصيل (نفس القاعدة، سكيمة public) ---- */
+app.get('/api/delivery-clients', auth, async (req, res) => {
+  try {
+    const { rows } = await pool.query(
+      `SELECT c.id, c.name, c.area, c.orders_count,
+         COALESCE(array_agg(DISTINCT p.phone) FILTER (WHERE p.phone IS NOT NULL), '{}') AS phones
+       FROM public.clients c LEFT JOIN public.client_phones p ON p.client_id = c.id
+       GROUP BY c.id ORDER BY c.orders_count DESC NULLS LAST LIMIT 5000`);
+    res.json(rows);
+  } catch (e) { res.status(500).json({ error: 'clients', detail: e.message }); }
+});
+
 /* ---- تكامل: قراءة طلبات التوصيل من قاعدة الدليفري (نفس القاعدة، سكيمة public) ---- */
 app.get('/api/delivery-orders', auth, async (req, res) => {
   try {
