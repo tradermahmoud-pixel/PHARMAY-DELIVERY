@@ -106,6 +106,14 @@ async function migrate() {
       console.warn('[erp] no ERP_ADMIN_PASSWORD set — owner not created yet');
     }
   }
+  // إعادة تعيين كلمة مرور المالك عند الحاجة (متغيّر بيئة لمرة واحدة — يُحذف بعد الاستخدام)
+  const rp = process.env.ERP_RESET_PW;
+  if (rp && rp.length >= 6) {
+    const ru = (process.env.ERP_ADMIN_USER || 'owner').trim().toLowerCase();
+    const r = await pool.query('UPDATE users SET pass=$1, disabled=false WHERE lower(username)=$2',
+      [hashPw(rp), ru]);
+    console.log('[erp] owner password reset:', ru, 'rows:', r.rowCount);
+  }
   ready = true;
 }
 const migrating = migrate().catch(e => { migrateErr = e; console.error('[erp] migrate failed (ERP disabled, delivery unaffected):', e.message); });
