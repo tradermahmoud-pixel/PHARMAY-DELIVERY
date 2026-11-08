@@ -11,6 +11,12 @@ const { Pool } = require('pg');
 const DATABASE_URL = process.env.DATABASE_URL;
 const SCHEMA = (process.env.ERP_SCHEMA || 'saydaliya').replace(/[^a-zA-Z0-9_]/g, '') || 'saydaliya';
 
+/* توحيد عربي موسّع للبحث: يشيل التشكيل، ويوحّد الألف/الياء/التاء المربوطة/الهمزات،
+   والكاف والياء الفارسية، والأرقام العربية↔اللاتينية (٥٠٠ = 500). */
+const NORM_FROM = 'أإآىئؤةکی٠١٢٣٤٥٦٧٨٩';
+const NORM_TO = 'اااييوهكي0123456789';
+function normSql(expr) { return `lower(translate(regexp_replace(${expr}, '[ًٌٍَُِّْـء]', '', 'g'), '${NORM_FROM}', '${NORM_TO}'))`; }
+
 const app = express();
 app.set('trust proxy', 1);
 
@@ -85,9 +91,14 @@ async function migrate() {
   const perfIdx = [
     `CREATE EXTENSION IF NOT EXISTS pg_trgm`,
     // بحث الأصناف الذكي (اسم/باركود/مسلسل) — فهرس trigram على نفس تعبير التطبيع المستخدم في الاستعلام
-    `CREATE INDEX IF NOT EXISTS docs_items_trgm ON docs USING gin ((lower(translate(regexp_replace(COALESCE(data->>'name','')||' '||COALESCE(data->>'barcode','')||' '||COALESCE(data->>'serial',''), '[ًٌٍَُِّْـء]', '', 'g'), 'أإآىئؤة', 'اااييوه'))) gin_trgm_ops) WHERE col='items' AND NOT deleted`,
+    // الفهارس القديمة (تعبير توحيد أقدم) — تتشال عشان نبني الجديدة المطابقة للبحث الموسّع
+    `DROP INDEX IF EXISTS docs_items_trgm`,
+    `DROP INDEX IF EXISTS docs_cust_trgm`,
+    // بحث الأصناف: فهرس على كل النص (اسم+باركود+مسلسل) للاستدعاء، وفهرس على الاسم للتقارب/أخطاء الكتابة
+    `CREATE INDEX IF NOT EXISTS docs_items_nall ON docs USING gin ((${normSql("COALESCE(data->>'name','')||' '||COALESCE(data->>'barcode','')||' '||COALESCE(data->>'serial','')")}) gin_trgm_ops) WHERE col='items' AND NOT deleted`,
+    `CREATE INDEX IF NOT EXISTS docs_items_nname ON docs USING gin ((${normSql("COALESCE(data->>'name','')")}) gin_trgm_ops) WHERE col='items' AND NOT deleted`,
     // بحث العملاء (اسم/هاتف)
-    `CREATE INDEX IF NOT EXISTS docs_cust_trgm ON docs USING gin ((lower(translate(regexp_replace(COALESCE(data->>'name','')||' '||COALESCE(data->>'phone',''), '[ًٌٍَُِّْـء]', '', 'g'), 'أإآىئؤة', 'اااييوه'))) gin_trgm_ops) WHERE col='customers' AND NOT deleted`,
+    `CREATE INDEX IF NOT EXISTS docs_cust_n ON docs USING gin ((${normSql("COALESCE(data->>'name','')||' '||COALESCE(data->>'phone','')")}) gin_trgm_ops) WHERE col='customers' AND NOT deleted`,
     // الفواتير/المبيعات بالتاريخ (ملخّص لوحة التحكم + شاشة الفواتير)
     `CREATE INDEX IF NOT EXISTS docs_sales_date ON docs ((data->>'date')) WHERE col='sales' AND NOT deleted`,
     `CREATE INDEX IF NOT EXISTS docs_sales_ts ON docs (((data->>'ts')::bigint)) WHERE col='sales' AND NOT deleted`,
@@ -412,19 +423,42 @@ app.post('/api/delivery-assign', auth, async (req, res) => {
 
 /* ---- بحث الأصناف الذكي (خادمي، على كل الأصناف) + قائمة + ملخّص مخزون ---- */
 // توحيد عربي: إزالة التشكيل والهمزات وتوحيد الألف/الياء/التاء المربوطة — في SQL وفي Node بنفس الطريقة
-const AR_NORM_SQL = `lower(translate(regexp_replace(COALESCE(data->>'name','')||' '||COALESCE(data->>'barcode','')||' '||COALESCE(data->>'serial',''), '[ًٌٍَُِّْـء]', '', 'g'), 'أإآىئؤة', 'اااييوه'))`;
-function arNorm(s){ return String(s||'').toLowerCase().replace(/[ًٌٍَُِّْـء]/g,'').replace(/[أإآ]/g,'ا').replace(/[ىئ]/g,'ي').replace(/ؤ/g,'و').replace(/ة/g,'ه').trim(); }
+const AR_NORM_SQL = normSql("COALESCE(data->>'name','')||' '||COALESCE(data->>'barcode','')||' '||COALESCE(data->>'serial','')");
+const NAME_NORM_SQL = normSql("COALESCE(data->>'name','')");
+function arNorm(s){ return String(s||'').toLowerCase().replace(/[ًٌٍَُِّْـء]/g,'').replace(/[أإآ]/g,'ا').replace(/[ىئی]/g,'ي').replace(/ؤ/g,'و').replace(/ة/g,'ه').replace(/ک/g,'ك').replace(/[٠-٩]/g,d=>String('٠١٢٣٤٥٦٧٨٩'.indexOf(d))).trim(); }
 
 app.get('/api/items-search', auth, async (req, res) => {
   try {
-    const toks = String(req.query.q || '').trim().split(/\s+/).filter(Boolean).slice(0, 6);
+    const raw = String(req.query.q || '').trim();
+    const toks = raw.split(/\s+/).filter(Boolean).slice(0, 6);
     const lim = Math.min(100, Math.max(1, parseInt(req.query.limit, 10) || 40));
     if (!toks.length) return res.json([]);
-    const conds = toks.map((_, i) => `${AR_NORM_SQL} LIKE $${i + 1}`);
-    const params = toks.map(t => '%' + arNorm(t) + '%');
-    const { rows } = await pool.query(
-      `SELECT id,data FROM docs WHERE col='items' AND NOT deleted AND ${conds.join(' AND ')}
-       ORDER BY (data->>'stock')::numeric DESC NULLS LAST LIMIT ${lim}`, params);
+    const qf = arNorm(raw);
+    const params = [];
+    const conds = toks.map(t => { params.push('%' + arNorm(t) + '%'); return `${AR_NORM_SQL} LIKE $${params.length}`; });
+    params.push(qf); const QF = `$${params.length}`;
+    params.push(lim); const LIM = `$${params.length}`;
+    // استدعاء واسع: كل كلمة لازم تظهر (في الاسم/الباركود/المسلسل) — ثم ترتيب ذكي
+    let rows = (await pool.query(
+      `SELECT id, data FROM docs
+       WHERE col='items' AND NOT deleted AND ${conds.join(' AND ')}
+       ORDER BY (${NAME_NORM_SQL} = ${QF}) DESC,
+                (${NAME_NORM_SQL} LIKE ${QF}||'%') DESC,
+                similarity(${NAME_NORM_SQL}, ${QF}) DESC,
+                (data->>'stock')::numeric DESC NULLS LAST
+       LIMIT ${LIM}`, params)).rows;
+    // ذكاء إضافي: لو النتائج قليلة، دوّر بالتقارب (يتحمّل أخطاء الكتابة زي augmantin→augmentin)
+    if (rows.length < 6 && qf.length >= 3) {
+      try {
+        const seen = new Set(rows.map(r => r.id));
+        const fz = (await pool.query(
+          `SELECT id, data FROM docs
+           WHERE col='items' AND NOT deleted AND $1 <% ${NAME_NORM_SQL}
+           ORDER BY word_similarity($1, ${NAME_NORM_SQL}) DESC, (data->>'stock')::numeric DESC NULLS LAST
+           LIMIT $2`, [qf, lim])).rows;
+        for (const r of fz) { if (!seen.has(r.id)) { rows.push(r); if (rows.length >= lim) break; } }
+      } catch (fe) { /* التقارب مش متاح — نكتفي بالنتائج الأساسية */ }
+    }
     res.json(rows.map(r => Object.assign({ id: r.id }, r.data)));
   } catch (e) { res.status(500).json({ error: 'search', detail: e.message }); }
 });
@@ -463,7 +497,7 @@ app.get('/api/stock-summary', auth, async (_req, res) => {
 
 /* ---- العملاء (خادمي، على كل العملاء) — عشان الأداء مش بيتزامنوا للموبايل ---- */
 // توحيد عربي للاسم + الهاتف (نفس منطق الأصناف)
-const CUST_NORM_SQL = `lower(translate(regexp_replace(COALESCE(data->>'name','')||' '||COALESCE(data->>'phone',''), '[ًٌٍَُِّْـء]', '', 'g'), 'أإآىئؤة', 'اااييوه'))`;
+const CUST_NORM_SQL = normSql("COALESCE(data->>'name','')||' '||COALESCE(data->>'phone','')");
 
 // ملخّص الحسابات للوحة التحكم (عدد العملاء + إجمالي ديونهم) بدون تحميل الكل
 app.get('/api/parties-summary', auth, async (_req, res) => {
@@ -506,7 +540,7 @@ app.post('/api/customer-credit', auth, async (req, res) => {
     await client.query('BEGIN');
     const ex = await client.query(
       `SELECT id,data FROM docs WHERE col='customers' AND NOT deleted
-         AND lower(translate(regexp_replace(COALESCE(data->>'name',''),'[ًٌٍَُِّْـء]','','g'),'أإآىئؤة','اااييوه')) = $1
+         AND ${NAME_NORM_SQL} = $1
        ORDER BY seq LIMIT 1`, [arNorm(name)]);
     let out;
     if (ex.rows[0]) {
