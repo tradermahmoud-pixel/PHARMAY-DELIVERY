@@ -128,6 +128,8 @@
     $("tabs").hidden = tabs.length < 2;
     $("tabs").innerHTML = tabs.map(([k, l]) => `<button role="tab" data-tab="${k}">${l}</button>`).join("");
     $("r-from").value = $("r-to").value = S.today;
+    const sb = $("soundBtn"); if (sb) { sb.textContent = Snd.on ? "🔔" : "🔕"; sb.setAttribute("aria-pressed", Snd.on ? "true" : "false"); sb.onclick = () => setSound(!Snd.on); }
+    askNotify();
     setTab(tabs[0][0]);
     await refresh();
     clearInterval(S.pollT);
@@ -161,12 +163,68 @@
         const arrived = S.orders.find(o => o.lat != null && o.loc_source === "customer" && !hadLoc.has(o.id));
         if (arrived) toast(`لوكيشن أوردر #${arrived.no} وصل من العميل`);
       }
+      // تنبيه صوتي للصيدلية أول ما يجي أوردر جديد
+      if (S.user.role !== "driver") {
+        const relevant = S.orders.filter(o => o.status === "new" || o.status === "ready").map(o => o.id);
+        if (S.seenNew) {
+          const fresh = relevant.filter(id => !S.seenNew.has(id));
+          if (fresh.length) {
+            beep(3);
+            toast(`🛎️ وصل ${fresh.length > 1 ? fresh.length + " أوردرات جديدة" : "أوردر جديد"}`);
+            notifyBrowser(fresh.length > 1 ? `${fresh.length} أوردرات جديدة` : "أوردر جديد وصل 🛎️", "افتح البرنامج وابدأ تجهيزه");
+          }
+          fresh.forEach(id => S.seenNew.add(id));
+        } else S.seenNew = new Set(relevant);
+      }
       if (S.user.role !== "driver") S.drivers = (await api("/api/users")).filter(u => u.role === "driver" && u.active);
       $("sync").textContent = "آخر تحديث " + clock(new Date());
       notifyDriver();
       syncTracking();
       render();
     } catch (e) { $("sync").textContent = "مفيش اتصال — بيحاول تاني"; }
+  }
+
+  /* ---------- تنبيه صوتي عند وصول أوردر ---------- */
+  const Snd = { ctx: null, on: true };
+  try { Snd.on = localStorage.getItem("pd_sound") !== "0"; } catch (e) {}
+  function unlockAudio() {
+    try {
+      if (!Snd.ctx) { const AC = window.AudioContext || window.webkitAudioContext; if (AC) Snd.ctx = new AC(); }
+      if (Snd.ctx && Snd.ctx.state === "suspended") Snd.ctx.resume();
+    } catch (e) {}
+    askNotify();
+  }
+  ["pointerdown", "touchstart", "keydown"].forEach(ev =>
+    document.addEventListener(ev, unlockAudio, { once: true, passive: true }));
+  function beep(times) {
+    if (!Snd.on) return;
+    unlockAudio();
+    const ctx = Snd.ctx; if (!ctx) return;
+    const n = times || 2, notes = [880, 1174.7]; // رنّة لطيفة (A5 → D6)
+    for (let i = 0; i < n; i++) for (let j = 0; j < notes.length; j++) {
+      const t = ctx.currentTime + i * 0.5 + j * 0.16;
+      const osc = ctx.createOscillator(), g = ctx.createGain();
+      osc.type = "sine"; osc.frequency.value = notes[j];
+      g.gain.setValueAtTime(0.0001, t);
+      g.gain.exponentialRampToValueAtTime(0.3, t + 0.02);
+      g.gain.exponentialRampToValueAtTime(0.0001, t + 0.38);
+      osc.connect(g).connect(ctx.destination);
+      osc.start(t); osc.stop(t + 0.42);
+    }
+    try { navigator.vibrate && navigator.vibrate([250, 120, 250]); } catch (e) {}
+  }
+  function askNotify() { try { if ("Notification" in window && Notification.permission === "default") Notification.requestPermission(); } catch (e) {} }
+  function notifyBrowser(title, body) {
+    try {
+      if (!("Notification" in window) || Notification.permission !== "granted" || !document.hidden) return;
+      const n = new Notification(title, { body: body || "", icon: "/icon-192.png", tag: "pd-order", renotify: true });
+      setTimeout(() => { try { n.close(); } catch (e) {} }, 9000);
+    } catch (e) {}
+  }
+  function setSound(on) {
+    Snd.on = on; try { localStorage.setItem("pd_sound", on ? "1" : "0"); } catch (e) {}
+    const b = $("soundBtn"); if (b) { b.textContent = on ? "🔔" : "🔕"; b.setAttribute("aria-pressed", on ? "true" : "false"); }
+    if (on) { unlockAudio(); beep(1); toast("التنبيه الصوتي شغّال"); } else toast("التنبيه الصوتي اتقفل");
   }
 
   // Buzz the driver's phone when a new order is assigned to them
@@ -176,12 +234,18 @@
     S.orders.filter(o => o.driver_id === S.user.id).forEach(o => (cur[o.id] = { e: o.edited_at, s: o.status, no: o.no }));
     if (prev) {
       for (const [id, c] of Object.entries(cur)) {
-        const p = prev[id]; if (!p) continue;
+        const p = prev[id];
+        if (!p) { // أوردر جديد اتسند للطيار
+          beep(3);
+          toast(`🛵 أوردر جديد ليك #${c.no}`);
+          notifyBrowser("أوردر جديد ليك 🛵", `أوردر #${c.no} — افتح البرنامج`);
+          continue;
+        }
         if (c.s === "cancel" && p.s !== "cancel" && (p.s === "out" || p.s === "ready")) {
-          try { navigator.vibrate && navigator.vibrate([400, 150, 400, 150, 400]); } catch (e) {}
+          beep(2);
           toast(`أوردر #${c.no} اتلغى${p.s === "out" ? "، رجّعه للصيدلية" : ""}`);
         } else if (c.e && c.e !== p.e && c.s !== "cancel") {
-          try { navigator.vibrate && navigator.vibrate([300, 120, 300]); } catch (e) {}
+          beep(2);
           toast(`أوردر #${c.no} اتعدل، راجع الطلب والمبلغ`);
         }
       }
@@ -189,8 +253,9 @@
     S.mineState = cur;
     const mine = S.orders.filter(o => o.driver_id === S.user.id && o.status === "ready").map(o => o.id);
     if (S.lastMine && mine.some(id => !S.lastMine.includes(id))) {
-      try { navigator.vibrate && navigator.vibrate([200, 100, 200]); } catch (e) {}
-      toast("فيه أوردر جديد ليك");
+      beep(3);
+      toast("🛵 فيه أوردر جديد ليك");
+      notifyBrowser("أوردر جديد ليك 🛵", "افتح البرنامج");
     }
     S.lastMine = mine;
   }
