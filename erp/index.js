@@ -16,6 +16,7 @@ const SCHEMA = (process.env.ERP_SCHEMA || 'saydaliya').replace(/[^a-zA-Z0-9_]/g,
 const NORM_FROM = 'أإآىئؤةکی٠١٢٣٤٥٦٧٨٩';
 const NORM_TO = 'اااييوهكي0123456789';
 function normSql(expr) { return `lower(translate(regexp_replace(${expr}, '[ًٌٍَُِّْـء]', '', 'g'), '${NORM_FROM}', '${NORM_TO}'))`; }
+let SCOLS = false; // هل أعمدة البحث المخزّنة (sname/sall) متاحة؟ بتتحدد في migrate
 
 const app = express();
 app.set('trust proxy', 1);
@@ -87,16 +88,24 @@ async function migrate() {
       token text PRIMARY KEY, user_id text NOT NULL REFERENCES users(id) ON DELETE CASCADE,
       created_at bigint NOT NULL, last_seen bigint NOT NULL);
   `);
+  // أعمدة بحث مطبّعة مخزّنة (Postgres يحافظ عليها تلقائيًا) — بدل حساب التطبيع لكل صنف في كل استعلام
+  // sname = الاسم مطبّع، sall = اسم+باركود+مسلسل مطبّع. منتظرة قبل الإقلاع عشان البحث يعتمد عليها.
+  try {
+    await pool.query(`ALTER TABLE docs ADD COLUMN IF NOT EXISTS sname text GENERATED ALWAYS AS (${normSql("COALESCE(data->>'name','')")}) STORED`);
+    await pool.query(`ALTER TABLE docs ADD COLUMN IF NOT EXISTS sall text GENERATED ALWAYS AS (${normSql("COALESCE(data->>'name','')||' '||COALESCE(data->>'barcode','')||' '||COALESCE(data->>'serial','')")}) STORED`);
+    SCOLS = true; console.log('[erp] search columns ready');
+  } catch (e) { SCOLS = false; console.warn('[erp] search columns unavailable (fallback to expressions):', (e.message || '').split('\n')[0]); }
   // فهارس الأداء (best-effort — أي فشل ما يوقفش الإقلاع) — تسرّع البحث والتجميعات مع كبر البيانات
   const perfIdx = [
     `CREATE EXTENSION IF NOT EXISTS pg_trgm`,
-    // بحث الأصناف الذكي (اسم/باركود/مسلسل) — فهرس trigram على نفس تعبير التطبيع المستخدم في الاستعلام
-    // الفهارس القديمة (تعبير توحيد أقدم) — تتشال عشان نبني الجديدة المطابقة للبحث الموسّع
-    `DROP INDEX IF EXISTS docs_items_trgm`,
-    `DROP INDEX IF EXISTS docs_cust_trgm`,
-    // بحث الأصناف: فهرس على كل النص (اسم+باركود+مسلسل) للاستدعاء، وفهرس على الاسم للتقارب/أخطاء الكتابة
-    `CREATE INDEX IF NOT EXISTS docs_items_nall ON docs USING gin ((${normSql("COALESCE(data->>'name','')||' '||COALESCE(data->>'barcode','')||' '||COALESCE(data->>'serial','')")}) gin_trgm_ops) WHERE col='items' AND NOT deleted`,
-    `CREATE INDEX IF NOT EXISTS docs_items_nname ON docs USING gin ((${normSql("COALESCE(data->>'name','')")}) gin_trgm_ops) WHERE col='items' AND NOT deleted`,
+    // فهارس قديمة (تعابير) — تتشال، البحث بقى على الأعمدة المخزّنة
+    `DROP INDEX IF EXISTS docs_items_trgm`, `DROP INDEX IF EXISTS docs_cust_trgm`,
+    `DROP INDEX IF EXISTS docs_items_nall`, `DROP INDEX IF EXISTS docs_items_nname`,
+    // بحث الأصناف على الأعمدة المخزّنة: btree للبادئة (سريع جدًا للحروف الأولى) + trigram للـ«أي مكان» والتقارب
+    `CREATE INDEX IF NOT EXISTS docs_sname_pat ON docs (sname text_pattern_ops) WHERE col='items' AND NOT deleted`,
+    `CREATE INDEX IF NOT EXISTS docs_sall_pat ON docs (sall text_pattern_ops) WHERE col='items' AND NOT deleted`,
+    `CREATE INDEX IF NOT EXISTS docs_sname_trgm ON docs USING gin (sname gin_trgm_ops) WHERE col='items' AND NOT deleted`,
+    `CREATE INDEX IF NOT EXISTS docs_sall_trgm ON docs USING gin (sall gin_trgm_ops) WHERE col='items' AND NOT deleted`,
     // بحث العملاء (اسم/هاتف)
     `CREATE INDEX IF NOT EXISTS docs_cust_n ON docs USING gin ((${normSql("COALESCE(data->>'name','')||' '||COALESCE(data->>'phone','')")}) gin_trgm_ops) WHERE col='customers' AND NOT deleted`,
     // الفواتير/المبيعات بالتاريخ (ملخّص لوحة التحكم + شاشة الفواتير)
@@ -427,38 +436,61 @@ const AR_NORM_SQL = normSql("COALESCE(data->>'name','')||' '||COALESCE(data->>'b
 const NAME_NORM_SQL = normSql("COALESCE(data->>'name','')");
 function arNorm(s){ return String(s||'').toLowerCase().replace(/[ًٌٍَُِّْـء]/g,'').replace(/[أإآ]/g,'ا').replace(/[ىئی]/g,'ي').replace(/ؤ/g,'و').replace(/ة/g,'ه').replace(/ک/g,'ك').replace(/[٠-٩]/g,d=>String('٠١٢٣٤٥٦٧٨٩'.indexOf(d))).trim(); }
 
+/* بحث الأصناف الموحّد (نقطة البيع + المخزون) — دقيق وسريع:
+   المستوى ١ (دقيق): كل كلمة نصية تطابق *بداية كلمة* في الاسم (زي أي POS)، والأرقام تطابق في الكود/الجرعة.
+   المستوى ٢ (أوسع): لو الناتج قليل، مطابقة في أي مكان (اسم/باركود/مسلسل).
+   المستوى ٣ (ذكي): لو لسه قليل، تقارب لأخطاء الكتابة.
+   الترتيب: تطابق تام ← يبدأ بالبحث ← بداية كلمة ← الاسم. كله على أعمدة مخزّنة مفهرسة. */
+async function searchItems(raw, o) {
+  const lim = o.lim, off = o.off || 0;
+  const SN = SCOLS ? 'sname' : NAME_NORM_SQL, SA = SCOLS ? 'sall' : AR_NORM_SQL;
+  const toks = String(raw || '').trim().split(/\s+/).filter(Boolean).slice(0, 6).map(arNorm).filter(Boolean);
+  const qf = arNorm(raw || '');
+  const base = ["col='items'", 'NOT deleted'];
+  if (o.low) base.push(`(data->>'min')::numeric>0 AND (data->>'stock')::numeric<=(data->>'min')::numeric`);
+  const B = base.join(' AND ');
+  if (!toks.length) {
+    return (await pool.query(`SELECT id,data FROM docs WHERE ${B} ORDER BY ${SN} LIMIT $1 OFFSET $2`, [lim, off])).rows;
+  }
+  // المستوى ١
+  const P = []; const p = v => { P.push(v); return '$' + P.length; };
+  const t1 = toks.map(t => /^\d+$/.test(t)
+    ? `${SA} LIKE ${p('%' + t + '%')}`
+    : `(${SN} LIKE ${p(t + '%')} OR ${SN} LIKE ${p('% ' + t + '%')})`);
+  const rank = `CASE WHEN ${SN} = ${p(qf)} THEN 0 WHEN ${SN} LIKE ${p(qf + '%')} THEN 1 WHEN ${SN} LIKE ${p('% ' + qf + '%')} THEN 2 ELSE 3 END`;
+  let rows = (await pool.query(
+    `SELECT id,data FROM docs WHERE ${B} AND ${t1.join(' AND ')} ORDER BY ${rank}, ${SN} LIMIT ${p(lim)} OFFSET ${p(off)}`, P)).rows;
+  if (rows.length >= lim || off > 0) return rows;
+  const seen = new Set(rows.map(r => r.id));
+  // المستوى ٢
+  const P2 = []; const p2 = v => { P2.push(v); return '$' + P2.length; };
+  const t2 = toks.map(t => `${SA} LIKE ${p2('%' + t + '%')}`);
+  const rank2 = `CASE WHEN ${SN} LIKE ${p2(qf + '%')} THEN 0 WHEN ${SN} LIKE ${p2('% ' + qf + '%')} THEN 1 ELSE 2 END`;
+  const more = (await pool.query(
+    `SELECT id,data FROM docs WHERE ${B} AND ${t2.join(' AND ')} ORDER BY ${rank2}, ${SN} LIMIT ${p2(lim)}`, P2)).rows;
+  for (const r of more) if (!seen.has(r.id)) { rows.push(r); seen.add(r.id); if (rows.length >= lim) return rows; }
+  // المستوى ٣ — عتبة تقارب أقل من الافتراضي (0.6) عشان تلقط أخطاء الكتابة، مع الحفاظ على استخدام الفهرس
+  if (rows.length < 6 && qf.length >= 3) {
+    const c = await pool.connect();
+    try {
+      await c.query('BEGIN');
+      await c.query(`SET LOCAL search_path TO "${SCHEMA}"`);
+      await c.query('SET LOCAL pg_trgm.word_similarity_threshold = 0.42');
+      const fz = (await c.query(
+        `SELECT id,data FROM docs WHERE ${B} AND $1 <% ${SN} ORDER BY word_similarity($1, ${SN}) DESC, ${SN} LIMIT $2`, [qf, lim])).rows;
+      await c.query('COMMIT');
+      for (const r of fz) if (!seen.has(r.id)) { rows.push(r); seen.add(r.id); if (rows.length >= lim) break; }
+    } catch (e) { await c.query('ROLLBACK').catch(() => {}); /* التقارب غير متاح — نكتفي بالنتائج */ }
+    finally { c.release(); }
+  }
+  return rows;
+}
+
 app.get('/api/items-search', auth, async (req, res) => {
   try {
-    const raw = String(req.query.q || '').trim();
-    const toks = raw.split(/\s+/).filter(Boolean).slice(0, 6);
     const lim = Math.min(100, Math.max(1, parseInt(req.query.limit, 10) || 40));
-    if (!toks.length) return res.json([]);
-    const qf = arNorm(raw);
-    const params = [];
-    const conds = toks.map(t => { params.push('%' + arNorm(t) + '%'); return `${AR_NORM_SQL} LIKE $${params.length}`; });
-    params.push(qf); const QF = `$${params.length}`;
-    params.push(lim); const LIM = `$${params.length}`;
-    // استدعاء واسع: كل كلمة لازم تظهر (في الاسم/الباركود/المسلسل) — ثم ترتيب ذكي
-    let rows = (await pool.query(
-      `SELECT id, data FROM docs
-       WHERE col='items' AND NOT deleted AND ${conds.join(' AND ')}
-       ORDER BY (${NAME_NORM_SQL} = ${QF}) DESC,
-                (${NAME_NORM_SQL} LIKE ${QF}||'%') DESC,
-                similarity(${NAME_NORM_SQL}, ${QF}) DESC,
-                (data->>'stock')::numeric DESC NULLS LAST
-       LIMIT ${LIM}`, params)).rows;
-    // ذكاء إضافي: لو النتائج قليلة، دوّر بالتقارب (يتحمّل أخطاء الكتابة زي augmantin→augmentin)
-    if (rows.length < 6 && qf.length >= 3) {
-      try {
-        const seen = new Set(rows.map(r => r.id));
-        const fz = (await pool.query(
-          `SELECT id, data FROM docs
-           WHERE col='items' AND NOT deleted AND $1 <% ${NAME_NORM_SQL}
-           ORDER BY word_similarity($1, ${NAME_NORM_SQL}) DESC, (data->>'stock')::numeric DESC NULLS LAST
-           LIMIT $2`, [qf, lim])).rows;
-        for (const r of fz) { if (!seen.has(r.id)) { rows.push(r); if (rows.length >= lim) break; } }
-      } catch (fe) { /* التقارب مش متاح — نكتفي بالنتائج الأساسية */ }
-    }
+    if (!String(req.query.q || '').trim()) return res.json([]);
+    const rows = await searchItems(req.query.q, { lim });
     res.json(rows.map(r => Object.assign({ id: r.id }, r.data)));
   } catch (e) { res.status(500).json({ error: 'search', detail: e.message }); }
 });
@@ -467,12 +499,7 @@ app.get('/api/items', auth, async (req, res) => {
   try {
     const lim = Math.min(300, Math.max(1, parseInt(req.query.limit, 10) || 100));
     const off = Math.max(0, parseInt(req.query.offset, 10) || 0);
-    const toks = String(req.query.q || '').trim().split(/\s+/).filter(Boolean).slice(0, 6);
-    const where = ["col='items'", 'NOT deleted']; const params = [];
-    toks.forEach(t => { params.push('%' + arNorm(t) + '%'); where.push(`${AR_NORM_SQL} LIKE $${params.length}`); });
-    if (req.query.low === '1') where.push(`(data->>'min')::numeric>0 AND (data->>'stock')::numeric<=(data->>'min')::numeric`);
-    const { rows } = await pool.query(
-      `SELECT id,data FROM docs WHERE ${where.join(' AND ')} ORDER BY data->>'name' LIMIT ${lim} OFFSET ${off}`, params);
+    const rows = await searchItems(req.query.q, { lim, off, low: req.query.low === '1' });
     res.json(rows.map(r => Object.assign({ id: r.id }, r.data)));
   } catch (e) { res.status(500).json({ error: 'items', detail: e.message }); }
 });

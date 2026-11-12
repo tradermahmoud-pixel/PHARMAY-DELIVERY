@@ -395,11 +395,13 @@ function vDash(v){
 let itemQ='', itemsData=[], itemsLoading=false, itemLow=false;
 function serialOf(i){return i.serial||String(i.id||'').replace(/^gen_/,'')}
 function itemById(id){return itemsData.find(x=>x.id===id)}
+let itemsReq=0;
 function loadItems(){
+  const my=++itemsReq; // حماية سباق: آخر طلب بس هو اللي يتعرض
   itemsLoading=true;renderItemRows();
   const u=(window.__BASE__||'')+'/api/items?limit=300&low='+(itemLow?'1':'0')+'&q='+encodeURIComponent(itemQ.trim());
-  fetch(u,{credentials:'same-origin'}).then(r=>r.ok?r.json():[]).then(j=>{itemsData=Array.isArray(j)?j:[];})
-    .catch(()=>{itemsData=[];}).finally(()=>{itemsLoading=false;renderItemRows();});
+  fetch(u,{credentials:'same-origin'}).then(r=>r.ok?r.json():[]).then(j=>{if(my!==itemsReq)return;itemsData=Array.isArray(j)?j:[];})
+    .catch(()=>{if(my===itemsReq)itemsData=[];}).finally(()=>{if(my!==itemsReq)return;itemsLoading=false;renderItemRows();});
 }
 function renderItemRows(){
   const tb=$('#itembody');if(!tb)return;const list=itemsData;
@@ -472,13 +474,15 @@ function posAdd(id){
   if(ex)ex.qty++;else cart.push({item:id,name:it.name,serial:serialOf(it),price:+it.sell||0,cost:+it.buy||0,qty:1});
   renderPOS();
 }
+let posReq=0;
 function loadPosSearch(){
   const q=posQ.trim();
+  const my=++posReq; // حماية سباق: آخر طلب بس هو اللي يتعرض
   if(!q){posResults=[];renderResults();return;}
   posSearching=true;renderResults();
   fetch((window.__BASE__||'')+'/api/items-search?q='+encodeURIComponent(q)+'&limit=50',{credentials:'same-origin'})
-    .then(r=>r.ok?r.json():[]).then(j=>{posResults=Array.isArray(j)?j:[];})
-    .catch(()=>{posResults=[];}).finally(()=>{posSearching=false;renderResults();});
+    .then(r=>r.ok?r.json():[]).then(j=>{if(my!==posReq)return;posResults=Array.isArray(j)?j:[];})
+    .catch(()=>{if(my===posReq)posResults=[];}).finally(()=>{if(my!==posReq)return;posSearching=false;renderResults();});
 }
 function posQty(id,d){const c=cart.find(x=>x.item===id);if(!c)return;c.qty=Math.max(1,(+c.qty||1)+d);renderPOS()}
 function posSet(id,val){const c=cart.find(x=>x.item===id);if(!c)return;c.qty=Math.max(0,+val||0);if(c.qty===0)cart=cart.filter(x=>x.item!==id);renderPOS()}
@@ -808,11 +812,13 @@ async function loadDelivClients(){
 /* العملاء: بحث خادمي ذكي على كل العملاء (مش بيتحمّلوا كلهم للموبايل) */
 let custData=[], custLoading=false, custT=null;
 function custById(id){return custData.find(x=>x.id===id)}
+let custReq=0;
 function loadCust(){
+  const my=++custReq; // حماية سباق
   custLoading=true;const tb=$('#custbody');if(tb&&!custData.length)renderCustRows();
   const u=(window.__BASE__||'')+'/api/customers?limit=200&q='+encodeURIComponent(cvQ.trim());
-  fetch(u,{credentials:'same-origin'}).then(r=>r.ok?r.json():[]).then(j=>{custData=Array.isArray(j)?j:[];})
-    .catch(()=>{custData=[];}).finally(()=>{custLoading=false;renderCustRows();});
+  fetch(u,{credentials:'same-origin'}).then(r=>r.ok?r.json():[]).then(j=>{if(my!==custReq)return;custData=Array.isArray(j)?j:[];})
+    .catch(()=>{if(my===custReq)custData=[];}).finally(()=>{if(my!==custReq)return;custLoading=false;renderCustRows();});
 }
 function renderCustRows(){
   const tb=$('#custbody');if(!tb)return;
