@@ -469,15 +469,20 @@ async function searchItems(raw, o) {
   const more = (await pool.query(
     `SELECT id,data FROM docs WHERE ${B} AND ${t2.join(' AND ')} ORDER BY ${rank2}, ${SN} LIMIT ${p2(lim)}`, P2)).rows;
   for (const r of more) if (!seen.has(r.id)) { rows.push(r); seen.add(r.id); if (rows.length >= lim) return rows; }
-  // المستوى ٣ — عتبة تقارب أقل من الافتراضي (0.6) عشان تلقط أخطاء الكتابة، مع الحفاظ على استخدام الفهرس
-  if (rows.length < 6 && qf.length >= 3) {
+  // المستوى ٣ — تقارب لأخطاء الكتابة، لكن *لكل كلمة على حدة* وكلها لازم تتحقق:
+  // الأرقام تتطابق بالظبط (600 يعني 600)، والكلمات النصية (٣ حروف+) بالتقارب. كده «BRU 600» ما يجيبش أي «600».
+  const isNum = t => /^\d+$/.test(t);
+  if (rows.length < 6 && toks.some(t => !isNum(t) && t.length >= 3)) {
     const c = await pool.connect();
     try {
       await c.query('BEGIN');
       await c.query(`SET LOCAL search_path TO "${SCHEMA}"`);
       await c.query('SET LOCAL pg_trgm.word_similarity_threshold = 0.42');
+      const P3 = []; const p3 = v => { P3.push(v); return '$' + P3.length; };
+      const c3 = toks.map(t => (isNum(t) || t.length < 3) ? `${SA} LIKE ${p3('%' + t + '%')}` : `${p3(t)} <% ${SN}`);
+      const sim = toks.filter(t => !isNum(t) && t.length >= 3).map(t => `word_similarity(${p3(t)}, ${SN})`);
       const fz = (await c.query(
-        `SELECT id,data FROM docs WHERE ${B} AND $1 <% ${SN} ORDER BY word_similarity($1, ${SN}) DESC, ${SN} LIMIT $2`, [qf, lim])).rows;
+        `SELECT id,data FROM docs WHERE ${B} AND ${c3.join(' AND ')} ORDER BY ${sim.join(' + ')} DESC, ${SN} LIMIT ${p3(lim)}`, P3)).rows;
       await c.query('COMMIT');
       for (const r of fz) if (!seen.has(r.id)) { rows.push(r); seen.add(r.id); if (rows.length >= lim) break; }
     } catch (e) { await c.query('ROLLBACK').catch(() => {}); /* التقارب غير متاح — نكتفي بالنتائج */ }
