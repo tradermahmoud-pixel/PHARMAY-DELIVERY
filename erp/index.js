@@ -436,11 +436,10 @@ const AR_NORM_SQL = normSql("COALESCE(data->>'name','')||' '||COALESCE(data->>'b
 const NAME_NORM_SQL = normSql("COALESCE(data->>'name','')");
 function arNorm(s){ return String(s||'').toLowerCase().replace(/[ًٌٍَُِّْـء]/g,'').replace(/[أإآ]/g,'ا').replace(/[ىئی]/g,'ي').replace(/ؤ/g,'و').replace(/ة/g,'ه').replace(/ک/g,'ك').replace(/[٠-٩]/g,d=>String('٠١٢٣٤٥٦٧٨٩'.indexOf(d))).trim(); }
 
-/* بحث الأصناف الموحّد (نقطة البيع + المخزون) — دقيق وسريع:
-   المستوى ١ (دقيق): كل كلمة نصية تطابق *بداية كلمة* في الاسم (زي أي POS)، والأرقام تطابق في الكود/الجرعة.
-   المستوى ٢ (أوسع): لو الناتج قليل، مطابقة في أي مكان (اسم/باركود/مسلسل).
-   المستوى ٣ (ذكي): لو لسه قليل، تقارب لأخطاء الكتابة.
-   الترتيب: تطابق تام ← يبدأ بالبحث ← بداية كلمة ← الاسم. كله على أعمدة مخزّنة مفهرسة. */
+/* بحث الأصناف الموحّد (نقطة البيع + المخزون) — دقيق ومتوقّع:
+   الأساس: كل كلمة لازم تكون *جزء فعلي (substring)* من النص (اسم+باركود+مسلسل) — مفيش تقارب يجيب حاجة غلط.
+   الترتيب: يبدأ بالبحث ← الاسم فيه البحث كبداية كلمة ← كل الكلمات بداية كلمات ← الاسم.
+   التقارب (أخطاء الكتابة) بيشتغل *بس* لو كلمة واحدة ومفيش ولا نتيجة substring — كملاذ أخير زي «هل تقصد؟». */
 async function searchItems(raw, o) {
   const lim = o.lim, off = o.off || 0;
   const SN = SCOLS ? 'sname' : NAME_NORM_SQL, SA = SCOLS ? 'sall' : AR_NORM_SQL;
@@ -452,42 +451,25 @@ async function searchItems(raw, o) {
   if (!toks.length) {
     return (await pool.query(`SELECT id,data FROM docs WHERE ${B} ORDER BY ${SN} LIMIT $1 OFFSET $2`, [lim, off])).rows;
   }
-  // المستوى ١
+  // الأساس: كل كلمة substring (في الاسم/الباركود/المسلسل)
   const P = []; const p = v => { P.push(v); return '$' + P.length; };
-  const t1 = toks.map(t => /^\d+$/.test(t)
-    ? `${SA} LIKE ${p('%' + t + '%')}`
-    : `(${SN} LIKE ${p(t + '%')} OR ${SN} LIKE ${p('% ' + t + '%')})`);
-  const rank = `CASE WHEN ${SN} = ${p(qf)} THEN 0 WHEN ${SN} LIKE ${p(qf + '%')} THEN 1 WHEN ${SN} LIKE ${p('% ' + qf + '%')} THEN 2 ELSE 3 END`;
+  const conds = toks.map(t => `${SA} LIKE ${p('%' + t + '%')}`);
+  const wstart = toks.map(t => `(${SN} LIKE ${p(t + '%')} OR ${SN} LIKE ${p('% ' + t + '%')})`).join(' AND ');
+  const rank = `CASE WHEN ${SN} LIKE ${p(qf + '%')} THEN 0 WHEN ${SN} LIKE ${p('% ' + qf + '%')} THEN 1 WHEN ${wstart} THEN 2 ELSE 3 END`;
   let rows = (await pool.query(
-    `SELECT id,data FROM docs WHERE ${B} AND ${t1.join(' AND ')} ORDER BY ${rank}, ${SN} LIMIT ${p(lim)} OFFSET ${p(off)}`, P)).rows;
-  if (rows.length >= lim || off > 0) return rows;
-  const seen = new Set(rows.map(r => r.id));
-  // المستوى ٢
-  const P2 = []; const p2 = v => { P2.push(v); return '$' + P2.length; };
-  const t2 = toks.map(t => `${SA} LIKE ${p2('%' + t + '%')}`);
-  const rank2 = `CASE WHEN ${SN} LIKE ${p2(qf + '%')} THEN 0 WHEN ${SN} LIKE ${p2('% ' + qf + '%')} THEN 1 ELSE 2 END`;
-  const more = (await pool.query(
-    `SELECT id,data FROM docs WHERE ${B} AND ${t2.join(' AND ')} ORDER BY ${rank2}, ${SN} LIMIT ${p2(lim)}`, P2)).rows;
-  for (const r of more) if (!seen.has(r.id)) { rows.push(r); seen.add(r.id); if (rows.length >= lim) return rows; }
-  // المستوى ٣ — تقارب لأخطاء الكتابة، لكن *لكل كلمة على حدة* وكلها لازم تتحقق:
-  // الأرقام تتطابق بالظبط (600 يعني 600)، والكلمات النصية (٣ حروف+) بالتقارب. كده «BRU 600» ما يجيبش أي «600».
-  const isNum = t => /^\d+$/.test(t);
-  if (rows.length < 6 && toks.some(t => !isNum(t) && t.length >= 3)) {
-    const c = await pool.connect();
-    try {
-      await c.query('BEGIN');
-      await c.query(`SET LOCAL search_path TO "${SCHEMA}"`);
-      await c.query('SET LOCAL pg_trgm.word_similarity_threshold = 0.42');
-      const P3 = []; const p3 = v => { P3.push(v); return '$' + P3.length; };
-      const c3 = toks.map(t => (isNum(t) || t.length < 3) ? `${SA} LIKE ${p3('%' + t + '%')}` : `${p3(t)} <% ${SN}`);
-      const sim = toks.filter(t => !isNum(t) && t.length >= 3).map(t => `word_similarity(${p3(t)}, ${SN})`);
-      const fz = (await c.query(
-        `SELECT id,data FROM docs WHERE ${B} AND ${c3.join(' AND ')} ORDER BY ${sim.join(' + ')} DESC, ${SN} LIMIT ${p3(lim)}`, P3)).rows;
-      await c.query('COMMIT');
-      for (const r of fz) if (!seen.has(r.id)) { rows.push(r); seen.add(r.id); if (rows.length >= lim) break; }
-    } catch (e) { await c.query('ROLLBACK').catch(() => {}); /* التقارب غير متاح — نكتفي بالنتائج */ }
-    finally { c.release(); }
-  }
+    `SELECT id,data FROM docs WHERE ${B} AND ${conds.join(' AND ')} ORDER BY ${rank}, ${SN} LIMIT ${p(lim)} OFFSET ${p(off)}`, P)).rows;
+  // ملاذ أخير: كلمة واحدة بدون أي نتيجة → تقارب لأخطاء الكتابة فقط (augmantin→augmentin)
+  if (rows.length || off > 0 || toks.length !== 1 || qf.length < 3) return rows;
+  const c = await pool.connect();
+  try {
+    await c.query('BEGIN');
+    await c.query(`SET LOCAL search_path TO "${SCHEMA}"`);
+    await c.query('SET LOCAL pg_trgm.word_similarity_threshold = 0.5');
+    rows = (await c.query(
+      `SELECT id,data FROM docs WHERE ${B} AND $1 <% ${SN} ORDER BY word_similarity($1, ${SN}) DESC, ${SN} LIMIT $2`, [qf, lim])).rows;
+    await c.query('COMMIT');
+  } catch (e) { await c.query('ROLLBACK').catch(() => {}); }
+  finally { c.release(); }
   return rows;
 }
 
@@ -602,6 +584,7 @@ app.get('*', async (req, res) => {
   try {
     const u = await userByToken(cookies(req)[COOKIE]);
     if (!u) return res.redirect(base(req) + '/login');
+    res.set('Cache-Control', 'no-cache'); // دايمًا يتأكد من آخر نسخة عشان التحديثات توصل فورًا
     res.sendFile(path.join(pub, 'app.html'));
   } catch (e) { res.redirect(base(req) + '/login'); }
 });
