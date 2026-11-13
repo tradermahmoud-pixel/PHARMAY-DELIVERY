@@ -457,6 +457,7 @@ async function searchItems(raw, o) {
   const qf = arNorm(raw || '');
   const base = ["col='items'", 'NOT deleted'];
   if (o.low) base.push(`(data->>'min')::numeric>0 AND (data->>'stock')::numeric<=(data->>'min')::numeric`);
+  if (o.instock) base.push(`COALESCE(NULLIF(data->>'stock','')::numeric,0) > 0`);
   const B = base.join(' AND ');
   if (!toks.length) {
     return (await pool.query(`SELECT id,data FROM docs WHERE ${B} ORDER BY ${SN} LIMIT $1 OFFSET $2`, [lim, off])).rows;
@@ -484,7 +485,7 @@ app.get('/api/items', auth, async (req, res) => {
   try {
     const lim = Math.min(300, Math.max(1, parseInt(req.query.limit, 10) || 100));
     const off = Math.max(0, parseInt(req.query.offset, 10) || 0);
-    const rows = await searchItems(req.query.q, { lim, off, low: req.query.low === '1' });
+    const rows = await searchItems(req.query.q, { lim, off, low: req.query.low === '1', instock: req.query.instock === '1' });
     res.json(rows.map(r => Object.assign({ id: r.id }, r.data)));
   } catch (e) { res.status(500).json({ error: 'items', detail: e.message }); }
 });

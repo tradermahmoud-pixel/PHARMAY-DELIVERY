@@ -392,14 +392,14 @@ function vDash(v){
 }
 
 /* ---------- Items / Inventory (بحث خادمي ذكي على كل الأصناف) ---------- */
-let itemQ='', itemsData=[], itemsLoading=false, itemLow=false;
+let itemQ='', itemsData=[], itemsLoading=false, itemFilter='all'; // all | instock | low
 function serialOf(i){return i.serial||String(i.id||'').replace(/^gen_/,'')}
 function itemById(id){return itemsData.find(x=>x.id===id)}
 let itemsReq=0;
 function loadItems(){
   const my=++itemsReq; // حماية سباق: آخر طلب بس هو اللي يتعرض
   itemsLoading=true;renderItemRows();
-  const u=(window.__BASE__||'')+'/api/items?limit=300&low='+(itemLow?'1':'0')+'&q='+encodeURIComponent(itemQ.trim());
+  const u=(window.__BASE__||'')+'/api/items?limit=300&low='+(itemFilter==='low'?'1':'0')+'&instock='+(itemFilter==='instock'?'1':'0')+'&q='+encodeURIComponent(itemQ.trim());
   fetch(u,{credentials:'same-origin'}).then(r=>r.ok?r.json():[]).then(j=>{if(my!==itemsReq)return;itemsData=Array.isArray(j)?j:[];})
     .catch(()=>{if(my===itemsReq)itemsData=[];}).finally(()=>{if(my!==itemsReq)return;itemsLoading=false;renderItemRows();});
 }
@@ -419,19 +419,25 @@ function vItems(v){
   v.innerHTML=`
   <div class="sbar">
     <div class="search">${icon('search')}<input id="q" placeholder="بحث بالاسم أو الباركود أو المسلسل… (ذكي ومرن)" value="${esc(itemQ)}"></div>
-    <div class="seg" style="max-width:200px"><button id="allb" class="${!itemLow?'on':''}">الكل</button><button id="lowb" class="${itemLow?'on':''}">تحت الحد</button></div>
+    <div class="seg" style="max-width:320px;flex-wrap:wrap">
+      <button data-f="all" class="${itemFilter==='all'?'on':''}">الكل</button>
+      <button data-f="instock" class="${itemFilter==='instock'?'on':''}">رصيد فقط</button>
+      <button data-f="low" class="${itemFilter==='low'?'on':''}">تحت الحد</button>
+    </div>
     <button class="btn pri" onclick="itemEdit()">${icon('plus')} صنف جديد</button>
   </div>
   <div class="card"><div class="tbl-wrap"><table class="tbl">
     <thead><tr><th>مسلسل</th><th>الصنف</th><th>التصنيف</th><th>الباركود</th><th>بيع</th><th>المتاح</th><th></th></tr></thead>
     <tbody id="itembody"></tbody>
   </table></div></div>
-  <p style="color:var(--muted);font-size:12px;margin-top:10px">بحث ذكي على كل الأصناف في السيرفر (يتجاهل الهمزات والتشكيل وترتيب الكلمات) · حتى ٣٠٠ نتيجة</p>`;
+  <p style="color:var(--muted);font-size:12px;margin-top:10px">بحث ذكي على كل الأصناف في السيرفر (يتجاهل الهمزات والتشكيل وترتيب الكلمات) · «رصيد فقط» = المتاح أكبر من صفر · حتى ٣٠٠ نتيجة</p>`;
   renderItemRows();loadItems();
   const qi=$('#q');if(qi)qi.oninput=e=>{itemQ=e.target.value;clearTimeout(rT);rT=setTimeout(loadItems,300)};
-  const ab=$('#allb'),lb=$('#lowb');
-  if(ab)ab.onclick=()=>{itemLow=false;ab.classList.add('on');lb.classList.remove('on');loadItems()};
-  if(lb)lb.onclick=()=>{itemLow=true;lb.classList.add('on');ab.classList.remove('on');loadItems()};
+  v.querySelectorAll('.seg [data-f]').forEach(b=>b.onclick=()=>{
+    itemFilter=b.dataset.f;
+    v.querySelectorAll('.seg [data-f]').forEach(x=>x.classList.toggle('on',x===b));
+    loadItems();
+  });
 }
 function itemEdit(id){
   const it=id?(itemById(id)||{}):{};
