@@ -245,7 +245,7 @@ const icon=(k,w)=>`<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" st
 
 /* ============================= data layer ============================= */
 let DB,USER,ME;
-const COLS=['purchases','vendors','cash','employees','attendance','settings'];
+const COLS=['purchases','vendors','cash','employees','settings'];
 const state={}; COLS.forEach(c=>state[c]={});
 const arr=c=>Object.values(state[c]||{});
 const get=(c,id)=>state[c]&&state[c][id];
@@ -788,22 +788,37 @@ function copyPurchOrder(){
   const txt='أمر شراء — '+new Date().toLocaleDateString('ar-EG')+'\n\n'+purchData.map(r=>`${r.name} × ${num(r.suggest)}`).join('\n');
   (navigator.clipboard?navigator.clipboard.writeText(txt):Promise.reject()).then(()=>toast('اتنسخ أمر الشراء ✓','ok')).catch(()=>{prompt('انسخ أمر الشراء:',txt)});
 }
+let billsDays=30, billsQ='', billsData=null, billsReq=0;
+function loadBills(){
+  const my=++billsReq;
+  const u=(window.__BASE__||'')+'/api/purchases?days='+billsDays+'&q='+encodeURIComponent(billsQ.trim());
+  fetch(u,{credentials:'same-origin'}).then(r=>r.ok?r.json():[]).then(j=>{if(my!==billsReq)return;billsData=Array.isArray(j)?j:[];if(route==='purch'&&purchTab==='bills')renderPurchBills();})
+    .catch(()=>{if(my===billsReq){billsData=[];renderPurchBills();}});
+}
 function renderPurchBills(){
   const b=$('#purchBody');if(!b)return;
-  const list=arr('purchases').sort((a,b)=>b.ts-a.ts);
-  b.innerHTML=`
-  <div class="sbar"><div class="sp" style="flex:1"></div><button class="btn pri" onclick="purchNew()">${icon('plus')} فاتورة شراء يدوية</button></div>
-  <div class="card"><div class="tbl-wrap"><table class="tbl">
-    <thead><tr><th>#</th><th>التاريخ</th><th>المورد</th><th>الأصناف</th><th>الإجمالي</th><th>مدفوع</th><th>الحالة</th><th></th></tr></thead>
+  const DS=[[7,'أسبوع'],[30,'شهر'],[90,'٣ شهور'],[365,'سنة']];
+  const head=`<div class="sbar" style="flex-wrap:wrap;gap:8px">
+    <div class="search" style="min-width:180px">${icon('search')}<input id="bq" placeholder="بحث بالمورد أو الصنف أو رقم الفاتورة…" value="${esc(billsQ)}"></div>
+    <div class="seg">${DS.map(d=>`<button class="${billsDays===d[0]?'on':''}" onclick="billsDays=${d[0]};loadBills()">${d[1]}</button>`).join('')}</div>
+    <div class="sp" style="flex:1"></div><button class="btn sm" onclick="loadBills()">${icon('chk')} تحديث</button>
+  </div>`;
+  if(billsData===null){b.innerHTML=head+`<div class="empty">${icon('cart',44)}<div>بحمّل…</div></div>`;wireBQ();loadBills();return;}
+  const list=billsData;
+  const tot=list.reduce((s,p)=>s+(+p.total||0),0);
+  b.innerHTML=head+`<div class="card"><div class="tbl-wrap"><table class="tbl">
+    <thead><tr><th>#</th><th>التاريخ</th><th>المورد</th><th>الأصناف</th><th>الإجمالي</th></tr></thead>
     <tbody>${list.length?list.map(p=>`<tr>
-      <td class="num">${p.no||''}</td><td>${dmy(p.date)}</td><td>${esc(p.vendor||'—')}</td>
-      <td class="num">${(p.lines||[]).length}</td><td class="num"><b>${moneyp(p.total)}</b></td>
-      <td class="num">${moneyp(p.paid)}</td>
-      <td>${(+p.paid||0)>=(+p.total||0)?'<span class="pill g">مدفوعة</span>':`<span class="pill w">باقي ${num((+p.total||0)-(+p.paid||0))}</span>`}</td>
-      <td><div class="act"><button class="ib dng" onclick="purchDel('${p.id}')">${icon('trash')}</button></div></td>
-    </tr>`).join(''):`<tr><td colspan=8><div class="empty">${icon('cart',44)}<div>لا توجد فواتير شراء · فواتير الشرا من Genius قريبًا</div></div></td></tr>`}</tbody>
-  </table></div></div>`;
+      <td class="num">${esc(p.no||'')}</td><td class="num">${esc(p.date||'—')}</td>
+      <td style="font-weight:600">${esc(p.vendor||'—')}</td>
+      <td style="max-width:320px;font-size:13px;color:var(--muted)">${esc((p.items||'').slice(0,110))}</td>
+      <td class="num"><b>${moneyp(p.total)}</b></td>
+    </tr>`).join(''):`<tr><td colspan=5><div class="empty">${icon('cart',44)}<div>لا فواتير شرا في الفترة دي · بتظهر بعد مزامنة Genius</div></div></td></tr>`}</tbody>
+  </table></div></div>
+  ${list.length?`<p style="color:var(--muted);font-size:12px;margin-top:8px">${num(list.length)} فاتورة · الإجمالي <b style="color:var(--ink)">${money(tot)}</b></p>`:''}`;
+  wireBQ();
 }
+function wireBQ(){const q=$('#bq');if(q)q.oninput=e=>{billsQ=e.target.value;clearTimeout(rT);rT=setTimeout(loadBills,300)};}
 function purchNew(){
   pcart=[];
   modal('فاتورة شراء جديدة',`
@@ -1019,22 +1034,52 @@ function cashMove(type){
 function cashDel(id){confirmDel('حذف هذه الحركة؟',()=>{del('cash',id);toast('تم الحذف','ok')})}
 
 /* ---------- Employees ---------- */
+let empTab='attend', empDays=7, attData=null, attReq=0;
 function vEmp(v){
-  const list=arr('employees').sort((a,b)=>(a.name||'').localeCompare(b.name||'','ar'));
   v.innerHTML=`
-  <div class="sbar"><div class="sp" style="flex:1"></div><button class="btn pri" onclick="empEdit()">${icon('plus')} موظف جديد</button></div>
-  <div class="card"><div class="tbl-wrap"><table class="tbl">
-    <thead><tr><th>الاسم</th><th>الوظيفة</th><th>الهاتف</th><th>المرتب</th><th>الحضور</th><th></th></tr></thead>
-    <tbody>${list.length?list.map(e=>{
-      const t0=dayStart(0);const att=arr('attendance').find(a=>a.emp===e.id&&a.ts>=t0&&a.ts<t0+864e5);
-      return `<tr>
-      <td style="font-weight:600">${esc(e.name)}</td><td>${esc(e.role||'—')}</td>
-      <td class="num" dir="ltr" style="text-align:right">${esc(e.phone||'—')}</td><td class="num">${moneyp(e.salary)}</td>
-      <td>${att?(att.out?`<span class="pill n">${att.in}–${att.out} (${att.hours||0}س)</span>`:`<span class="pill g">حاضر منذ ${att.in}</span>`):'<span class="pill n">—</span>'}</td>
-      <td><div class="act">
-        ${att&&!att.out?`<button class="btn sm" onclick="empOut('${att.id}')">انصراف</button>`:!att?`<button class="btn sm" onclick="empIn('${e.id}')">حضور</button>`:''}
-        <button class="ib" onclick="empEdit('${e.id}')">${icon('edit')}</button><button class="ib dng" onclick="empDel('${e.id}')">${icon('trash')}</button>
-      </div></td></tr>`}).join(''):`<tr><td colspan=6><div class="empty">${icon('id',44)}<div>لا يوجد موظفين</div></div></td></tr>`}</tbody>
+  <div class="sbar"><div class="seg" style="max-width:320px">
+    <button class="${empTab==='attend'?'on':''}" onclick="empTab='attend';vEmp($('#view'))">${icon('id')} الحضور والانصراف</button>
+    <button class="${empTab==='list'?'on':''}" onclick="empTab='list';vEmp($('#view'))">${icon('users')} الموظفين</button>
+  </div></div>
+  <div id="empBody"></div>`;
+  if(empTab==='attend'){renderAtt();if(attData===null)loadAtt();}else renderEmpList();
+}
+function loadAtt(){
+  const my=++attReq;
+  fetch((window.__BASE__||'')+'/api/attendance?days='+empDays,{credentials:'same-origin'})
+    .then(r=>r.ok?r.json():[]).then(j=>{if(my!==attReq)return;attData=Array.isArray(j)?j:[];if(route==='emp'&&empTab==='attend')renderAtt();})
+    .catch(()=>{if(my===attReq){attData=[];renderAtt();}});
+}
+function renderAtt(){
+  const b=$('#empBody');if(!b)return;
+  const DS=[[1,'النهاردة'],[7,'أسبوع'],[30,'شهر']];
+  const tm=s=>s?String(s).slice(11,16):'—';
+  const hoursOf=a=>{if(a.arrive_ts&&a.leave_ts){const h=(a.leave_ts-a.arrive_ts)/3600000;return h>0&&h<24?h.toFixed(1)+'س':''}return ''};
+  const head=`<div class="sbar"><div class="seg">${DS.map(d=>`<button class="${empDays===d[0]?'on':''}" onclick="empDays=${d[0]};loadAtt()">${d[1]}</button>`).join('')}</div><div class="sp" style="flex:1"></div><button class="btn sm" onclick="loadAtt()">${icon('chk')} تحديث</button></div>`;
+  const rows=attData;
+  if(rows===null){b.innerHTML=head+`<div class="empty">${icon('id',44)}<div>بحمّل…</div></div>`;return;}
+  b.innerHTML=head+`<div class="card"><div class="tbl-wrap"><table class="tbl">
+    <thead><tr><th>الموظف</th><th>اليوم</th><th>الحضور</th><th>الانصراف</th><th>ساعات</th></tr></thead>
+    <tbody>${rows.length?rows.map(a=>`<tr>
+      <td style="font-weight:600">${esc(a.emp_name||'—')}</td>
+      <td class="num">${esc(a.day||'—')}</td>
+      <td class="num">${tm(a.arrive)}</td>
+      <td class="num">${a.leave?tm(a.leave):'<span class="pill g">لسه حاضر</span>'}</td>
+      <td class="num">${hoursOf(a)||'—'}</td>
+    </tr>`).join(''):`<tr><td colspan=5><div class="empty">${icon('id',44)}<div>لا سجلات حضور في الفترة دي · بتظهر بعد مزامنة Genius</div></div></td></tr>`}</tbody>
+  </table></div></div>
+  ${rows.length?`<p style="color:var(--muted);font-size:12px;margin-top:8px">${num(rows.length)} سجل</p>`:''}`;
+}
+function renderEmpList(){
+  const b=$('#empBody');if(!b)return;
+  const list=arr('employees').sort((a,b)=>(a.name||'').localeCompare(b.name||'','ar'));
+  b.innerHTML=`<div class="card"><div class="tbl-wrap"><table class="tbl">
+    <thead><tr><th>الاسم</th><th>الكود</th><th>الهاتف</th><th>الحالة</th></tr></thead>
+    <tbody>${list.length?list.map(e=>`<tr>
+      <td style="font-weight:600">${esc(e.name)}</td><td class="num">${esc(e.code||'—')}</td>
+      <td class="num" dir="ltr" style="text-align:right">${esc(e.phone||'—')}</td>
+      <td>${e.active===false?'<span class="pill n">غير نشط</span>':'<span class="pill g">نشط</span>'}</td>
+    </tr>`).join(''):`<tr><td colspan=4><div class="empty">${icon('id',44)}<div>لا يوجد موظفين · هيظهروا بعد المزامنة</div></div></td></tr>`}</tbody>
   </table></div></div>`;
 }
 function empEdit(id){

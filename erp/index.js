@@ -200,7 +200,7 @@ app.get('/api/sync', auth, async (req, res) => {
   const since = parseInt(req.query.since, 10) || 0;
   // الفواتير والأصناف مش بتتزامن للعميل (كتير جدًا) — بتتقرى من endpoints مخصصة عشان الأداء
   const { rows } = await pool.query(
-    "SELECT col,id,data,deleted,seq FROM docs WHERE seq>$1 AND col NOT IN ('sales','items','customers') ORDER BY seq LIMIT 20000", [since]);
+    "SELECT col,id,data,deleted,seq FROM docs WHERE seq>$1 AND col NOT IN ('sales','items','customers','istats','attendance','gpur') ORDER BY seq LIMIT 20000", [since]);
   let seq = since;
   const docs = rows.map(r => { if (r.seq > seq) seq = Number(r.seq); return r.deleted ? { c: r.col, i: r.id, x: true } : { c: r.col, i: r.id, d: r.data }; });
   // تقديم المؤشر لتخطّي مستندات الفواتير المستبعَدة (طالما مفيش صفحة ممتلئة)
@@ -523,6 +523,33 @@ app.get('/api/purchase-suggest', auth, async (req, res) => {
   } catch (e) { res.status(500).json({ error: 'purchase', detail: e.message }); }
 });
 
+// الحضور والانصراف (من Genius) — خادمي
+app.get('/api/attendance', auth, async (req, res) => {
+  try {
+    const days = Math.min(120, Math.max(1, parseInt(req.query.days, 10) || 14));
+    const emp = String(req.query.emp || '').trim();
+    const params = [days]; let where = `col='attendance' AND NOT deleted AND (data->>'day') >= to_char(now() - ($1::int * interval '1 day'),'YYYY-MM-DD')`;
+    if (emp) { params.push(emp); where += ` AND data->>'emp_id' = $${params.length}`; }
+    const { rows } = await pool.query(`SELECT id,data FROM docs WHERE ${where} ORDER BY data->>'arrive' DESC NULLS LAST LIMIT 2000`, params);
+    res.json(rows.map(r => Object.assign({ id: r.id }, r.data)));
+  } catch (e) { res.status(500).json({ error: 'attendance', detail: e.message }); }
+});
+
+// فواتير الشرا (من Genius) — خادمي
+app.get('/api/purchases', auth, async (req, res) => {
+  try {
+    const days = Math.min(365, Math.max(1, parseInt(req.query.days, 10) || 30));
+    const lim = Math.min(300, Math.max(1, parseInt(req.query.limit, 10) || 100));
+    const params = [days]; let where = `col='gpur' AND NOT deleted AND (data->>'date') >= to_char(now() - ($1::int * interval '1 day'),'YYYY-MM-DD')`;
+    const q = String(req.query.q || '').trim();
+    if (q) { params.push('%' + q + '%'); where += ` AND (COALESCE(data->>'vendor','') ILIKE $${params.length} OR COALESCE(data->>'items','') ILIKE $${params.length} OR data->>'no' = ${q.match(/^\d+$/) ? "'" + q + "'" : 'NULL'})`; }
+    params.push(lim);
+    const { rows } = await pool.query(`SELECT id,data FROM docs WHERE ${where} ORDER BY COALESCE(NULLIF(data->>'ts','')::bigint,0) DESC LIMIT $${params.length}`, params);
+    res.json(rows.map(r => Object.assign({ id: r.id }, r.data)));
+  } catch (e) { res.status(500).json({ error: 'purchases', detail: e.message }); }
+});
+
+// ملخّص الحضور اليوم + عدد الموظفين (للوحة التحكم إن احتجناه لاحقًا)
 app.get('/api/stock-summary', auth, async (_req, res) => {
   try {
     const out = await memo('stock', 60000, async () => {
