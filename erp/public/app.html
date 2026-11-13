@@ -735,10 +735,64 @@ function renderDeliv(v){
 
 /* ---------- Purchases ---------- */
 let pcart=[];
+let purchTab='suggest', purchCover=14, purchQ='', purchAll=false, purchData=null, purchReq=0;
 function vPurch(v){
-  const list=arr('purchases').sort((a,b)=>b.ts-a.ts);
   v.innerHTML=`
-  <div class="sbar"><div class="sp" style="flex:1"></div><button class="btn pri" onclick="purchNew()">${icon('plus')} فاتورة شراء</button></div>
+  <div class="sbar">
+    <div class="seg" style="max-width:280px">
+      <button class="${purchTab==='suggest'?'on':''}" onclick="purchTab='suggest';vPurch($('#view'))">${icon('cart')} أمر الشراء</button>
+      <button class="${purchTab==='bills'?'on':''}" onclick="purchTab='bills';vPurch($('#view'))">${icon('bill')} فواتير الشرا</button>
+    </div>
+  </div>
+  <div id="purchBody"></div>`;
+  if(purchTab==='suggest'){renderPurchSuggest();if(purchData===null)loadPurchSuggest();}else renderPurchBills();
+}
+function loadPurchSuggest(){
+  const my=++purchReq;
+  const u=(window.__BASE__||'')+'/api/purchase-suggest?cover='+purchCover+'&all='+(purchAll?'1':'0')+'&q='+encodeURIComponent(purchQ.trim());
+  fetch(u,{credentials:'same-origin'}).then(r=>r.ok?r.json():[]).then(j=>{if(my!==purchReq)return;purchData=Array.isArray(j)?j:[];if(route==='purch'&&purchTab==='suggest')renderPurchSuggest();})
+    .catch(()=>{if(my===purchReq){purchData=[];renderPurchSuggest();}});
+}
+function renderPurchSuggest(){
+  const b=$('#purchBody');if(!b)return;
+  const COV=[[7,'أسبوع'],[14,'أسبوعين'],[30,'شهر'],[60,'شهرين']];
+  const rows=purchData;
+  const head=`
+  <div class="sbar" style="flex-wrap:wrap;gap:8px">
+    <div class="search" style="min-width:200px">${icon('search')}<input id="pq" placeholder="بحث في الأصناف…" value="${esc(purchQ)}"></div>
+    <div class="seg">${COV.map(c=>`<button class="${purchCover===c[0]?'on':''}" onclick="purchCover=${c[0]};loadPurchSuggest()">${c[1]}</button>`).join('')}</div>
+    <label class="fld" style="margin:0;flex-direction:row;align-items:center;gap:6px"><input type="checkbox" ${purchAll?'checked':''} onchange="purchAll=this.checked;loadPurchSuggest()" style="width:auto"> <span style="margin:0;font-size:13px">عرض الكل مش النواقص بس</span></label>
+    <div class="sp" style="flex:1"></div>
+    <button class="btn sm" onclick="copyPurchOrder()">${icon('chk')} نسخ أمر الشراء</button>
+  </div>
+  <p style="color:var(--muted);font-size:12px;margin:0 0 10px">المقترح = كمية تكفي الفترة المختارة حسب معدل البيع، ناقص المتاح. مرتّب بالأكثر إلحاحًا (اللي قرب يخلص).</p>`;
+  if(rows===null){b.innerHTML=head+`<div class="empty">${icon('cart',44)}<div>بحمّل…</div></div>`;wirePQ();return;}
+  const body=`<div class="card"><div class="tbl-wrap"><table class="tbl">
+    <thead><tr><th>الصنف</th><th>المتاح</th><th>بيع ٣٠ي</th><th>بيع ٩٠ي</th><th>معدل/يوم</th><th>يكفي</th><th>المقترح طلبه</th></tr></thead>
+    <tbody>${rows.length?rows.map(r=>{const dc=r.days_cover==null?null:+r.days_cover;const urgent=dc!=null&&dc<=7;return `<tr>
+      <td style="font-weight:600">${esc(r.name||'—')}${r.name_ar?`<div style="font-size:11px;color:var(--muted)">${esc(r.name_ar)}</div>`:''}</td>
+      <td class="num ${+r.stock<=0?'':''}" style="${+r.stock<=0?'color:var(--danger);font-weight:700':''}">${num(r.stock)}</td>
+      <td class="num">${num(r.q30)}</td>
+      <td class="num">${num(r.q90)}</td>
+      <td class="num">${num(r.avg_daily)}</td>
+      <td class="num">${dc==null?'—':`<span class="pill ${urgent?'r':'n'}">${num(dc)} يوم</span>`}</td>
+      <td class="num"><b style="color:var(--brand)">${num(r.suggest)}</b></td>
+    </tr>`}).join(''):`<tr><td colspan=7><div class="empty">${icon('chk',44)}<div>${purchAll?'لا أصناف':'مفيش نواقص — كل الأصناف كفايتها كويسة 👍'}</div></div></td></tr>`}</tbody>
+  </table></div></div>
+  ${rows.length?`<p style="color:var(--muted);font-size:12px;margin-top:8px">${num(rows.length)} صنف${purchAll?'':' محتاج طلب'}</p>`:''}`;
+  b.innerHTML=head+body;wirePQ();
+}
+function wirePQ(){const q=$('#pq');if(q)q.oninput=e=>{purchQ=e.target.value;clearTimeout(rT);rT=setTimeout(loadPurchSuggest,300)};}
+function copyPurchOrder(){
+  if(!purchData||!purchData.length)return toast('مفيش حاجة','err');
+  const txt='أمر شراء — '+new Date().toLocaleDateString('ar-EG')+'\n\n'+purchData.map(r=>`${r.name} × ${num(r.suggest)}`).join('\n');
+  (navigator.clipboard?navigator.clipboard.writeText(txt):Promise.reject()).then(()=>toast('اتنسخ أمر الشراء ✓','ok')).catch(()=>{prompt('انسخ أمر الشراء:',txt)});
+}
+function renderPurchBills(){
+  const b=$('#purchBody');if(!b)return;
+  const list=arr('purchases').sort((a,b)=>b.ts-a.ts);
+  b.innerHTML=`
+  <div class="sbar"><div class="sp" style="flex:1"></div><button class="btn pri" onclick="purchNew()">${icon('plus')} فاتورة شراء يدوية</button></div>
   <div class="card"><div class="tbl-wrap"><table class="tbl">
     <thead><tr><th>#</th><th>التاريخ</th><th>المورد</th><th>الأصناف</th><th>الإجمالي</th><th>مدفوع</th><th>الحالة</th><th></th></tr></thead>
     <tbody>${list.length?list.map(p=>`<tr>
@@ -747,7 +801,7 @@ function vPurch(v){
       <td class="num">${moneyp(p.paid)}</td>
       <td>${(+p.paid||0)>=(+p.total||0)?'<span class="pill g">مدفوعة</span>':`<span class="pill w">باقي ${num((+p.total||0)-(+p.paid||0))}</span>`}</td>
       <td><div class="act"><button class="ib dng" onclick="purchDel('${p.id}')">${icon('trash')}</button></div></td>
-    </tr>`).join(''):`<tr><td colspan=8><div class="empty">${icon('cart',44)}<div>لا توجد فواتير شراء</div></div></td></tr>`}</tbody>
+    </tr>`).join(''):`<tr><td colspan=8><div class="empty">${icon('cart',44)}<div>لا توجد فواتير شراء · فواتير الشرا من Genius قريبًا</div></div></td></tr>`}</tbody>
   </table></div></div>`;
 }
 function purchNew(){

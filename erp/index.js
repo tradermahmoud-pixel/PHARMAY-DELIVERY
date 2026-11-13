@@ -490,6 +490,39 @@ app.get('/api/items', auth, async (req, res) => {
   } catch (e) { res.status(500).json({ error: 'items', detail: e.message }); }
 });
 
+// النواقص وأمر الشراء — يجمع المخزون الحالي مع معدلات البيع (istats) ويقترح كميات الطلب
+app.get('/api/purchase-suggest', auth, async (req, res) => {
+  try {
+    const cover = Math.min(120, Math.max(1, parseInt(req.query.cover, 10) || 14)); // أيام التغطية المستهدفة
+    const lim = Math.min(500, Math.max(1, parseInt(req.query.limit, 10) || 300));
+    const toks = String(req.query.q || '').trim().split(/\s+/).filter(Boolean).slice(0, 6).map(arNorm).filter(Boolean);
+    const SA = SCOLS ? 'i.sall' : AR_NORM_SQL.replace(/data->>/g, "i.data->>");
+    const P = [cover]; const p = v => { P.push(v); return '$' + P.length; };
+    let where = `i.col='items' AND NOT i.deleted AND COALESCE(NULLIF(s.data->>'q90','')::numeric,0) > 0`;
+    toks.forEach(t => { where += ` AND ${SA} LIKE ${p('%' + t + '%')}`; });
+    const onlyShort = req.query.all !== '1';
+    const stockE = `COALESCE(NULLIF(i.data->>'stock','')::numeric,0)`;
+    const avgE = `(COALESCE(NULLIF(s.data->>'q90','')::numeric,0)/90.0)`;
+    const needE = `($1::numeric*${avgE} - ${stockE})`;
+    if (onlyShort) where += ` AND ${needE} > 0`;
+    P.push(lim);
+    const sql = `SELECT i.data->>'name' AS name, i.data->>'name_ar' AS name_ar, i.data->>'barcode' AS barcode,
+        i.id, ${stockE} AS stock,
+        COALESCE(NULLIF(s.data->>'q30','')::numeric,0) AS q30,
+        COALESCE(NULLIF(s.data->>'q90','')::numeric,0) AS q90,
+        s.data->>'last_sold' AS last_sold,
+        ROUND(${avgE},2) AS avg_daily,
+        CASE WHEN ${avgE} > 0 THEN ROUND(${stockE}/${avgE},0) ELSE NULL END AS days_cover,
+        GREATEST(0, CEIL(${needE})) AS suggest
+      FROM docs i LEFT JOIN docs s ON s.col='istats' AND s.id=i.id
+      WHERE ${where}
+      ORDER BY CASE WHEN ${avgE}>0 THEN ${stockE}/${avgE} ELSE 999999 END ASC, q90 DESC
+      LIMIT $${P.length}`;
+    const rows = (await pool.query(sql, P)).rows;
+    res.json(rows);
+  } catch (e) { res.status(500).json({ error: 'purchase', detail: e.message }); }
+});
+
 app.get('/api/stock-summary', auth, async (_req, res) => {
   try {
     const out = await memo('stock', 60000, async () => {
