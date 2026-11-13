@@ -471,6 +471,22 @@ async function searchItems(raw, o) {
   return rows;
 }
 
+// تشخيص مؤقت (يتشال بعد الحل) — محمي بتوكن المزامنة
+app.get('/api/diag', async (req, res) => {
+  if (req.query.token !== process.env.ERP_SYNC_TOKEN) return res.status(403).json({ error: 'forbidden' });
+  try {
+    const rawq = String(req.query.q || 'bruf').toLowerCase();
+    const nq = arNorm(String(req.query.q || 'bruf'));
+    const out = {};
+    out.raw_name_match = (await pool.query(
+      `SELECT data->>'name' AS name, deleted, sall, sname FROM docs WHERE col='items' AND lower(data->>'name') LIKE '%'||$1||'%' LIMIT 30`, [rawq])).rows;
+    out.search_result = (await pool.query(
+      `SELECT data->>'name' AS name FROM docs WHERE col='items' AND NOT deleted AND sall LIKE '%'||$1||'%' LIMIT 30`, [nq])).rows.map(r => r.name);
+    out.counts = (await pool.query(
+      `SELECT count(*) FILTER (WHERE lower(data->>'name') LIKE '%'||$1||'%') AS raw, count(*) FILTER (WHERE sall LIKE '%'||$2||'%' AND NOT deleted) AS bysall FROM docs WHERE col='items'`, [rawq, nq])).rows[0];
+    res.json(out);
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
 app.get('/api/items-search', auth, async (req, res) => {
   try {
     const lim = Math.min(100, Math.max(1, parseInt(req.query.limit, 10) || 40));
