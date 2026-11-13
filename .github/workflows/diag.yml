@@ -14,5 +14,5 @@ jobs:
         run: |
           Q="${{ github.event.inputs.q }}"
           URL="https://pharmacy-delivery-ekv2.onrender.com/erp/api/diag?token=kC5OyGwCah2G2zPW6KIW1spt0tU2mfdm&q=$Q"
-          echo "=== DIAG for q=$Q ==="
-          curl -s --max-time 70 "$URL" | python3 -m json.tool || echo "curl/parse failed"
+          R=$(curl -s --max-time 70 "$URL" | tr -d '\n' | tr -d '\r')
+          echo "RESULTLINE:$R:ENDRESULT"
