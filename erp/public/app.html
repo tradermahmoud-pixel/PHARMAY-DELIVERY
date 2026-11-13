@@ -742,13 +742,56 @@ function vPurch(v){
     <div class="seg" style="max-width:420px;flex-wrap:wrap">
       <button class="${purchTab==='suggest'?'on':''}" onclick="purchTab='suggest';vPurch($('#view'))">${icon('cart')} النواقص وأمر الشراء</button>
       <button class="${purchTab==='consume'?'on':''}" onclick="purchTab='consume';vPurch($('#view'))">${icon('dash')} معدلات الاستهلاك</button>
+      <button class="${purchTab==='dead'?'on':''}" onclick="purchTab='dead';vPurch($('#view'))">${icon('warn')} الراكد</button>
       <button class="${purchTab==='bills'?'on':''}" onclick="purchTab='bills';vPurch($('#view'))">${icon('bill')} فواتير الشرا</button>
     </div>
   </div>
   <div id="purchBody"></div>`;
   if(purchTab==='suggest'){renderPurchSuggest();if(purchData===null)loadPurchSuggest();}
   else if(purchTab==='consume'){renderConsume();if(consData===null)loadConsume();}
+  else if(purchTab==='dead'){renderDead();if(deadData===null)loadDead();}
   else renderPurchBills();
+}
+let deadMode='dead', deadQ='', deadData=null, deadTotal=0, deadReq=0;
+function loadDead(){
+  const my=++deadReq;
+  const u=(window.__BASE__||'')+'/api/dead-stock?mode='+deadMode+'&q='+encodeURIComponent(deadQ.trim());
+  fetch(u,{credentials:'same-origin'}).then(r=>r.ok?r.json():null).then(j=>{if(my!==deadReq)return;deadData=j&&Array.isArray(j.rows)?j.rows:[];deadTotal=j?j.total:0;if(route==='purch'&&purchTab==='dead')renderDead();})
+    .catch(()=>{if(my===deadReq){deadData=[];renderDead();}});
+}
+function renderDead(){
+  const b=$('#purchBody');if(!b)return;
+  const head=`<div class="sbar" style="flex-wrap:wrap;gap:8px">
+    <div class="search" style="min-width:180px">${icon('search')}<input id="dq" placeholder="بحث في الأصناف…" value="${esc(deadQ)}"></div>
+    <div class="seg"><button class="${deadMode==='dead'?'on':''}" onclick="deadMode='dead';loadDead()">راكد تمامًا</button><button class="${deadMode==='slow'?'on':''}" onclick="deadMode='slow';loadDead()">بطيء الحركة</button></div>
+    <div class="sp" style="flex:1"></div>
+    <button class="btn sm" onclick="copyDead()">${icon('chk')} نسخ التقرير</button>
+  </div>
+  <p style="color:var(--muted);font-size:12px;margin:0 0 10px">${deadMode==='dead'?'أصناف ليها رصيد ومفيش عليها أي بيع آخر ٩٠ يوم — فلوس واقفة في المخزن.':'أصناف بتتباع ببطء شديد (المخزون يكفي أكتر من ٤ شهور) — متخزّن أكتر من اللازم.'}</p>`;
+  const rows=deadData;
+  if(rows===null){b.innerHTML=head+`<div class="empty">${icon('warn',44)}<div>بحمّل…</div></div>`;wireDQ();return;}
+  b.innerHTML=head+`<div class="kpis" style="grid-template-columns:repeat(auto-fill,minmax(180px,1fr));margin-bottom:12px">
+    <div class="kpi ${deadMode==='dead'?'accent':''}"><div class="t">${icon('warn')} ${deadMode==='dead'?'أصناف راكدة':'أصناف بطيئة'}</div><div class="v">${num(rows.length)}</div></div>
+    <div class="kpi"><div class="t">${icon('cash')} قيمة البضاعة الواقفة</div><div class="v" style="color:var(--danger)">${money(deadTotal)}</div><div class="s">بسعر البيع</div></div>
+  </div>
+  <div class="card"><div class="tbl-wrap"><table class="tbl">
+    <thead><tr><th>الصنف</th><th>المتاح</th><th>سعر البيع</th><th>القيمة الواقفة</th>${deadMode==='slow'?'<th>يكفي</th>':''}<th>آخر بيع</th></tr></thead>
+    <tbody>${rows.length?rows.map(r=>`<tr>
+      <td style="font-weight:600">${esc(r.name||'—')}${r.name_ar?`<div style="font-size:11px;color:var(--muted)">${esc(r.name_ar)}</div>`:''}</td>
+      <td class="num">${num(r.stock)}</td>
+      <td class="num">${moneyp(r.sell)}</td>
+      <td class="num"><b style="color:var(--danger)">${money(r.value)}</b></td>
+      ${deadMode==='slow'?`<td class="num"><span class="pill w">${num(r.days_cover)} يوم</span></td>`:''}
+      <td class="num" style="font-size:12px">${esc(r.last_sold||'من أكتر من ٩٠ يوم')}</td>
+    </tr>`).join(''):`<tr><td colspan="${deadMode==='slow'?6:5}"><div class="empty">${icon('chk',44)}<div>${deadMode==='dead'?'مفيش أصناف راكدة 👍':'مفيش أصناف بطيئة'}</div></div></td></tr>`}</tbody>
+  </table></div></div>`;
+  wireDQ();
+}
+function wireDQ(){const q=$('#dq');if(q)q.oninput=e=>{deadQ=e.target.value;clearTimeout(rT);rT=setTimeout(loadDead,300)};}
+function copyDead(){
+  if(!deadData||!deadData.length)return toast('مفيش بيانات','err');
+  const txt=`تقرير الأصناف ${deadMode==='dead'?'الراكدة':'بطيئة الحركة'} · القيمة الإجمالية ${num(deadTotal)} ج.م\n\n`+deadData.map(r=>`${r.name}: متاح ${num(r.stock)} · قيمة ${num(r.value)} ج.م${r.last_sold?` · آخر بيع ${r.last_sold}`:''}`).join('\n');
+  (navigator.clipboard?navigator.clipboard.writeText(txt):Promise.reject()).then(()=>toast('اتنسخ التقرير ✓','ok')).catch(()=>prompt('انسخ التقرير:',txt));
 }
 let consWin=30, consQ='', consSort='cons', consData=null, consReq=0;
 function loadConsume(){

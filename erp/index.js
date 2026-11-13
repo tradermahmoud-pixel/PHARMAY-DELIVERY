@@ -618,6 +618,36 @@ app.get('/api/consumption', auth, async (req, res) => {
   } catch (e) { res.status(500).json({ error: 'consumption', detail: e.message }); }
 });
 
+// تقرير الأصناف الراكدة — رصيد موجود بدون بيع (فلوس واقفة) أو بطيء الحركة (متخزّن أكتر من اللازم)
+app.get('/api/dead-stock', auth, async (req, res) => {
+  try {
+    const mode = req.query.mode === 'slow' ? 'slow' : 'dead';
+    const lim = Math.min(1000, Math.max(1, parseInt(req.query.limit, 10) || 300));
+    const toks = String(req.query.q || '').trim().split(/\s+/).filter(Boolean).slice(0, 6).map(arNorm).filter(Boolean);
+    const SA = SCOLS ? 'i.sall' : AR_NORM_SQL.replace(/data->>/g, "i.data->>");
+    const stockE = `COALESCE(NULLIF(i.data->>'stock','')::numeric,0)`;
+    const sellE = `COALESCE(NULLIF(i.data->>'sell','')::numeric,0)`;
+    const q90E = `COALESCE(NULLIF(s.data->>'q90','')::numeric,0)`;
+    const avgE = `(${q90E}/90.0)`;
+    const P = []; const p = v => { P.push(v); return '$' + P.length; };
+    let where = `i.col='items' AND NOT i.deleted AND ${stockE} > 0 AND `;
+    where += mode === 'slow' ? `${q90E} > 0 AND ${stockE}/${avgE} > 120` : `${q90E} = 0`;
+    toks.forEach(t => { where += ` AND ${SA} LIKE ${p('%' + t + '%')}`; });
+    P.push(lim);
+    const coverExpr = mode === 'slow' ? `ROUND(${stockE}/${avgE},0)` : 'NULL';
+    const sql = `SELECT i.data->>'name' AS name, i.data->>'name_ar' AS name_ar, i.data->>'barcode' AS barcode,
+        ${stockE} AS stock, ${sellE} AS sell, ROUND(${stockE}*${sellE},2) AS value,
+        ${q90E} AS q90, s.data->>'last_sold' AS last_sold, ${coverExpr} AS days_cover
+      FROM docs i LEFT JOIN docs s ON s.col='istats' AND s.id=i.id
+      WHERE ${where}
+      ORDER BY ${stockE}*${sellE} DESC
+      LIMIT $${P.length}`;
+    const rows = (await pool.query(sql, P)).rows;
+    const total = rows.reduce((s, r) => s + (+r.value || 0), 0);
+    res.json({ mode, total: Math.round(total * 100) / 100, count: rows.length, rows });
+  } catch (e) { res.status(500).json({ error: 'dead-stock', detail: e.message }); }
+});
+
 app.get('/api/stock-summary', auth, async (_req, res) => {
   try {
     const out = await memo('stock', 60000, async () => {
