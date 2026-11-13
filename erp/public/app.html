@@ -1037,12 +1037,55 @@ function cashDel(id){confirmDel('حذف هذه الحركة؟',()=>{del('cash',i
 let empTab='attend', empDays=7, attData=null, attReq=0;
 function vEmp(v){
   v.innerHTML=`
-  <div class="sbar"><div class="seg" style="max-width:320px">
+  <div class="sbar"><div class="seg" style="max-width:440px;flex-wrap:wrap">
     <button class="${empTab==='attend'?'on':''}" onclick="empTab='attend';vEmp($('#view'))">${icon('id')} الحضور والانصراف</button>
+    <button class="${empTab==='report'?'on':''}" onclick="empTab='report';vEmp($('#view'))">${icon('dash')} تقرير الساعات</button>
     <button class="${empTab==='list'?'on':''}" onclick="empTab='list';vEmp($('#view'))">${icon('users')} الموظفين</button>
   </div></div>
   <div id="empBody"></div>`;
-  if(empTab==='attend'){renderAtt();if(attData===null)loadAtt();}else renderEmpList();
+  if(empTab==='attend'){renderAtt();if(attData===null)loadAtt();}
+  else if(empTab==='report'){renderReport();if(repData===null)loadReport();}
+  else renderEmpList();
+}
+let repFrom='', repTo='', repData=null, repReq=0;
+function defRange(){const t=new Date();const to=t.toISOString().slice(0,10);const f=new Date(t);f.setDate(f.getDate()-29);return [f.toISOString().slice(0,10),to];}
+function loadReport(){
+  if(!repFrom||!repTo){const d=defRange();repFrom=repFrom||d[0];repTo=repTo||d[1];}
+  const my=++repReq;
+  const u=(window.__BASE__||'')+'/api/attendance-report?from='+repFrom+'&to='+repTo;
+  fetch(u,{credentials:'same-origin'}).then(r=>r.ok?r.json():null).then(j=>{if(my!==repReq)return;repData=j&&Array.isArray(j.rows)?j.rows:[];if(route==='emp'&&empTab==='report')renderReport();})
+    .catch(()=>{if(my===repReq){repData=[];renderReport();}});
+}
+function renderReport(){
+  const b=$('#empBody');if(!b)return;
+  if(!repFrom||!repTo){const d=defRange();repFrom=d[0];repTo=d[1];}
+  const head=`<div class="sbar" style="flex-wrap:wrap;gap:8px;align-items:flex-end">
+    <label class="fld" style="margin:0"><span>من</span><input type="date" value="${esc(repFrom)}" onchange="repFrom=this.value;loadReport()" style="width:auto"></label>
+    <label class="fld" style="margin:0"><span>إلى</span><input type="date" value="${esc(repTo)}" onchange="repTo=this.value;loadReport()" style="width:auto"></label>
+    <div class="sp" style="flex:1"></div>
+    <button class="btn sm" onclick="copyReport()">${icon('chk')} نسخ التقرير</button>
+  </div>`;
+  const rows=repData;
+  if(rows===null){b.innerHTML=head+`<div class="empty">${icon('dash',44)}<div>بحمّل…</div></div>`;return;}
+  const tH=rows.reduce((s,r)=>s+(+r.hours||0),0), tD=rows.reduce((s,r)=>s+(+r.days||0),0);
+  b.innerHTML=head+`<div class="card"><div class="tbl-wrap"><table class="tbl">
+    <thead><tr><th>الموظف</th><th>أيام الحضور</th><th>إجمالي الساعات</th><th>متوسط/يوم</th><th>جلسات مفتوحة</th></tr></thead>
+    <tbody>${rows.length?rows.map(r=>`<tr>
+      <td style="font-weight:600">${esc(r.emp_name||'—')}</td>
+      <td class="num">${num(r.days)}</td>
+      <td class="num"><b>${num(r.hours)} س</b></td>
+      <td class="num">${num(r.avg)} س</td>
+      <td class="num">${r.open_sessions?`<span class="pill w">${num(r.open_sessions)}</span>`:'—'}</td>
+    </tr>`).join('')+`<tr style="background:color-mix(in srgb,var(--brand) 6%,transparent);font-weight:700">
+      <td>الإجمالي (${num(rows.length)} موظف)</td><td class="num">${num(tD)}</td><td class="num">${num(Math.round(tH*10)/10)} س</td><td></td><td></td></tr>`
+    :`<tr><td colspan=5><div class="empty">${icon('dash',44)}<div>لا بيانات في الفترة · بتظهر بعد مزامنة Genius</div></div></td></tr>`}</tbody>
+  </table></div></div>
+  <p style="color:var(--muted);font-size:12px;margin-top:8px">الساعات محسوبة من وقت الحضور للانصراف لكل جلسة · «جلسات مفتوحة» = حضور من غير انصراف مسجّل</p>`;
+}
+function copyReport(){
+  if(!repData||!repData.length)return toast('مفيش بيانات','err');
+  const txt=`تقرير ساعات الموظفين  (${repFrom} → ${repTo})\n\n`+repData.map(r=>`${r.emp_name}: ${num(r.hours)} ساعة · ${num(r.days)} يوم · متوسط ${num(r.avg)}/يوم`).join('\n');
+  (navigator.clipboard?navigator.clipboard.writeText(txt):Promise.reject()).then(()=>toast('اتنسخ التقرير ✓','ok')).catch(()=>prompt('انسخ التقرير:',txt));
 }
 function loadAtt(){
   const my=++attReq;

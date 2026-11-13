@@ -535,6 +535,42 @@ app.get('/api/attendance', auth, async (req, res) => {
   } catch (e) { res.status(500).json({ error: 'attendance', detail: e.message }); }
 });
 
+// تقرير ساعات عمل الموظفين — فترة مرنة (من/إلى) + تجميع لكل موظف
+app.get('/api/attendance-report', auth, async (req, res) => {
+  try {
+    const re = /^\d{4}-\d{2}-\d{2}$/;
+    const to = re.test(req.query.to || '') ? req.query.to : new Date().toISOString().slice(0, 10);
+    let from = req.query.from;
+    if (!re.test(from || '')) { const d = new Date(to + 'T00:00:00Z'); d.setUTCDate(d.getUTCDate() - 29); from = d.toISOString().slice(0, 10); }
+    const emp = String(req.query.emp || '').trim();
+    const params = [from, to]; let empCond = '';
+    if (emp) { params.push(emp); empCond = ` AND data->>'emp_id' = $${params.length}`; }
+    const sql = `
+      WITH t AS (
+        SELECT data->>'emp_id' AS emp_id, data->>'emp_name' AS emp_name, data->>'day' AS day,
+               NULLIF(data->>'arrive_ts','')::bigint AS a, NULLIF(data->>'leave_ts','')::bigint AS l
+        FROM docs WHERE col='attendance' AND NOT deleted
+          AND (data->>'day') BETWEEN $1 AND $2${empCond})
+      SELECT emp_id, max(emp_name) AS emp_name,
+             count(DISTINCT day) AS days, count(*) AS records,
+             COALESCE(SUM(CASE WHEN a IS NOT NULL AND l IS NOT NULL AND l>a AND (l-a)<86400000 THEN (l-a)/3600000.0 ELSE 0 END),0) AS hours,
+             count(*) FILTER (WHERE l IS NULL) AS open_sessions,
+             min(day) AS first_day, max(day) AS last_day
+      FROM t GROUP BY emp_id
+      HAVING count(*) > 0
+      ORDER BY hours DESC`;
+    const { rows } = await pool.query(sql, params);
+    const out = rows.map(r => ({
+      emp_id: r.emp_id, emp_name: r.emp_name,
+      days: +r.days, records: +r.records,
+      hours: Math.round((+r.hours) * 10) / 10,
+      avg: +r.days ? Math.round((+r.hours / +r.days) * 10) / 10 : 0,
+      open_sessions: +r.open_sessions, first_day: r.first_day, last_day: r.last_day,
+    }));
+    res.json({ from, to, rows: out });
+  } catch (e) { res.status(500).json({ error: 'att-report', detail: e.message }); }
+});
+
 // فواتير الشرا (من Genius) — خادمي
 app.get('/api/purchases', auth, async (req, res) => {
   try {
