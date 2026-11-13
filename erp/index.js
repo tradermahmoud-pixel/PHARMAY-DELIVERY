@@ -17,7 +17,7 @@ const NORM_FROM = 'أإآىئؤةکی٠١٢٣٤٥٦٧٨٩';
 const NORM_TO = 'اااييوهكي0123456789';
 // يشيل التشكيل والهمزة، ثم علامات الترقيم (شرطة/نقطة/قوس/شرطة سفلية…) لتوحيد مثل URI-VIN = URIVIN، ثم يوحّد الحروف/الأرقام
 function normSql(expr) { return `lower(translate(regexp_replace(regexp_replace(${expr}, '[ًٌٍَُِّْـء]', '', 'g'), '[-./()+_'',*&]', '', 'g'), '${NORM_FROM}', '${NORM_TO}'))`; }
-const SEARCH_VER = '3'; // ابعته كل ما يتغيّر تعبير normSql عشان الأعمدة المخزّنة تتبني من جديد
+const SEARCH_VER = '4'; // ابعته كل ما يتغيّر تعبير normSql عشان الأعمدة المخزّنة تتبني من جديد
 let SCOLS = false; // هل أعمدة البحث المخزّنة (sname/sall) متاحة؟ بتتحدد في migrate
 
 const app = express();
@@ -99,7 +99,7 @@ async function migrate() {
       await pool.query(`ALTER TABLE docs DROP COLUMN IF EXISTS sname`);
       await pool.query(`ALTER TABLE docs DROP COLUMN IF EXISTS sall`);
       await pool.query(`ALTER TABLE docs ADD COLUMN sname text GENERATED ALWAYS AS (${normSql("COALESCE(data->>'name','')")}) STORED`);
-      await pool.query(`ALTER TABLE docs ADD COLUMN sall text GENERATED ALWAYS AS (${normSql("COALESCE(data->>'name','')||' '||COALESCE(data->>'barcode','')||' '||COALESCE(data->>'serial','')")}) STORED`);
+      await pool.query(`ALTER TABLE docs ADD COLUMN sall text GENERATED ALWAYS AS (${normSql("COALESCE(data->>'name','')||' '||COALESCE(data->>'name_ar','')||' '||COALESCE(data->>'barcode','')||' '||COALESCE(data->>'serial','')")}) STORED`);
       await pool.query(`INSERT INTO erp_meta(k,v) VALUES('search_cols_ver',$1) ON CONFLICT(k) DO UPDATE SET v=$1`, [SEARCH_VER]);
       console.log('[erp] search columns rebuilt to ver', SEARCH_VER);
     }
@@ -442,7 +442,7 @@ app.post('/api/delivery-assign', auth, async (req, res) => {
 
 /* ---- بحث الأصناف الذكي (خادمي، على كل الأصناف) + قائمة + ملخّص مخزون ---- */
 // توحيد عربي: إزالة التشكيل والهمزات وتوحيد الألف/الياء/التاء المربوطة — في SQL وفي Node بنفس الطريقة
-const AR_NORM_SQL = normSql("COALESCE(data->>'name','')||' '||COALESCE(data->>'barcode','')||' '||COALESCE(data->>'serial','')");
+const AR_NORM_SQL = normSql("COALESCE(data->>'name','')||' '||COALESCE(data->>'name_ar','')||' '||COALESCE(data->>'barcode','')||' '||COALESCE(data->>'serial','')");
 const NAME_NORM_SQL = normSql("COALESCE(data->>'name','')");
 function arNorm(s){ return String(s||'').toLowerCase().replace(/[ًٌٍَُِّْـء]/g,'').replace(/[-./()+_'*&,]/g,'').replace(/[أإآ]/g,'ا').replace(/[ىئی]/g,'ي').replace(/ؤ/g,'و').replace(/ة/g,'ه').replace(/ک/g,'ك').replace(/[٠-٩]/g,d=>String('٠١٢٣٤٥٦٧٨٩'.indexOf(d))).trim(); }
 
@@ -471,30 +471,6 @@ async function searchItems(raw, o) {
   return rows;
 }
 
-// تشخيص مؤقت (يتشال بعد الحل) — محمي بتوكن المزامنة
-app.get('/api/diag', async (req, res) => {
-  if (req.query.token !== process.env.ERP_SYNC_TOKEN) return res.status(403).json({ error: 'forbidden' });
-  try {
-    const rawq = String(req.query.q || 'bruf').toLowerCase();
-    const nq = arNorm(String(req.query.q || 'bruf'));
-    const out = {};
-    out.raw_name_match = (await pool.query(
-      `SELECT data->>'name' AS name, deleted, sall, sname FROM docs WHERE col='items' AND lower(data->>'name') LIKE '%'||$1||'%' LIMIT 30`, [rawq])).rows;
-    out.search_result = (await pool.query(
-      `SELECT data->>'name' AS name FROM docs WHERE col='items' AND NOT deleted AND sall LIKE '%'||$1||'%' LIMIT 30`, [nq])).rows.map(r => r.name);
-    out.counts = (await pool.query(
-      `SELECT count(*) FILTER (WHERE lower(data->>'name') LIKE '%'||$1||'%') AS raw, count(*) FILTER (WHERE sall LIKE '%'||$2||'%' AND NOT deleted) AS bysall FROM docs WHERE col='items'`, [rawq, nq])).rows[0];
-    out.totals = (await pool.query(
-      `SELECT count(*) AS total, count(*) FILTER (WHERE NOT deleted) AS live, count(*) FILTER (WHERE deleted) AS del,
-              to_timestamp(max(updated_at)/1000) AS last_update, to_timestamp(min(updated_at)/1000) AS first_update
-       FROM docs WHERE col='items'`)).rows[0];
-    out.by_code = (await pool.query(
-      `SELECT data->>'name' AS name, data->>'barcode' AS barcode, deleted FROM docs WHERE col='items' AND (data->>'barcode'=$1 OR data->>'serial'=$1) LIMIT 5`, [String(req.query.code || '32136')])).rows;
-    out.recent = (await pool.query(
-      `SELECT data->>'name' AS name, to_timestamp(updated_at/1000) AS upd FROM docs WHERE col='items' ORDER BY updated_at DESC LIMIT 5`)).rows;
-    res.json(out);
-  } catch (e) { res.status(500).json({ error: e.message }); }
-});
 app.get('/api/items-search', auth, async (req, res) => {
   try {
     const lim = Math.min(100, Math.max(1, parseInt(req.query.limit, 10) || 40));
