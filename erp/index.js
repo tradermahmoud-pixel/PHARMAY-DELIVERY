@@ -484,6 +484,14 @@ app.get('/api/diag', async (req, res) => {
       `SELECT data->>'name' AS name FROM docs WHERE col='items' AND NOT deleted AND sall LIKE '%'||$1||'%' LIMIT 30`, [nq])).rows.map(r => r.name);
     out.counts = (await pool.query(
       `SELECT count(*) FILTER (WHERE lower(data->>'name') LIKE '%'||$1||'%') AS raw, count(*) FILTER (WHERE sall LIKE '%'||$2||'%' AND NOT deleted) AS bysall FROM docs WHERE col='items'`, [rawq, nq])).rows[0];
+    out.totals = (await pool.query(
+      `SELECT count(*) AS total, count(*) FILTER (WHERE NOT deleted) AS live, count(*) FILTER (WHERE deleted) AS del,
+              to_timestamp(max(updated_at)/1000) AS last_update, to_timestamp(min(updated_at)/1000) AS first_update
+       FROM docs WHERE col='items'`)).rows[0];
+    out.by_code = (await pool.query(
+      `SELECT data->>'name' AS name, data->>'barcode' AS barcode, deleted FROM docs WHERE col='items' AND (data->>'barcode'=$1 OR data->>'serial'=$1) LIMIT 5`, [String(req.query.code || '32136')])).rows;
+    out.recent = (await pool.query(
+      `SELECT data->>'name' AS name, to_timestamp(updated_at/1000) AS upd FROM docs WHERE col='items' ORDER BY updated_at DESC LIMIT 5`)).rows;
     res.json(out);
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
