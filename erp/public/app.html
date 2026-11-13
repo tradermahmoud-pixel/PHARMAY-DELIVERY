@@ -739,13 +739,56 @@ let purchTab='suggest', purchCover=14, purchQ='', purchAll=false, purchData=null
 function vPurch(v){
   v.innerHTML=`
   <div class="sbar">
-    <div class="seg" style="max-width:280px">
-      <button class="${purchTab==='suggest'?'on':''}" onclick="purchTab='suggest';vPurch($('#view'))">${icon('cart')} أمر الشراء</button>
+    <div class="seg" style="max-width:420px;flex-wrap:wrap">
+      <button class="${purchTab==='suggest'?'on':''}" onclick="purchTab='suggest';vPurch($('#view'))">${icon('cart')} النواقص وأمر الشراء</button>
+      <button class="${purchTab==='consume'?'on':''}" onclick="purchTab='consume';vPurch($('#view'))">${icon('dash')} معدلات الاستهلاك</button>
       <button class="${purchTab==='bills'?'on':''}" onclick="purchTab='bills';vPurch($('#view'))">${icon('bill')} فواتير الشرا</button>
     </div>
   </div>
   <div id="purchBody"></div>`;
-  if(purchTab==='suggest'){renderPurchSuggest();if(purchData===null)loadPurchSuggest();}else renderPurchBills();
+  if(purchTab==='suggest'){renderPurchSuggest();if(purchData===null)loadPurchSuggest();}
+  else if(purchTab==='consume'){renderConsume();if(consData===null)loadConsume();}
+  else renderPurchBills();
+}
+let consWin=30, consQ='', consSort='cons', consData=null, consReq=0;
+function loadConsume(){
+  const my=++consReq;
+  const u=(window.__BASE__||'')+'/api/consumption?days='+consWin+'&sort='+consSort+'&q='+encodeURIComponent(consQ.trim());
+  fetch(u,{credentials:'same-origin'}).then(r=>r.ok?r.json():null).then(j=>{if(my!==consReq)return;consData=j&&Array.isArray(j.rows)?j.rows:[];if(route==='purch'&&purchTab==='consume')renderConsume();})
+    .catch(()=>{if(my===consReq){consData=[];renderConsume();}});
+}
+function renderConsume(){
+  const b=$('#purchBody');if(!b)return;
+  const head=`<div class="sbar" style="flex-wrap:wrap;gap:8px">
+    <div class="search" style="min-width:180px">${icon('search')}<input id="cq" placeholder="بحث في الأصناف…" value="${esc(consQ)}"></div>
+    <div class="seg"><button class="${consWin===30?'on':''}" onclick="consWin=30;loadConsume()">آخر ٣٠ يوم</button><button class="${consWin===90?'on':''}" onclick="consWin=90;loadConsume()">آخر ٩٠ يوم</button></div>
+    <div class="seg"><button class="${consSort==='cons'?'on':''}" onclick="consSort='cons';loadConsume()">الأكثر استهلاكًا</button><button class="${consSort==='cover'?'on':''}" onclick="consSort='cover';loadConsume()">الأقرب نفادًا</button></div>
+    <div class="sp" style="flex:1"></div>
+    <button class="btn sm" onclick="copyConsume()">${icon('chk')} نسخ التقرير</button>
+  </div>`;
+  const rows=consData;
+  if(rows===null){b.innerHTML=head+`<div class="empty">${icon('dash',44)}<div>بحمّل…</div></div>`;wireCQ();return;}
+  const tC=rows.reduce((s,r)=>s+(+r.cons||0),0);
+  b.innerHTML=head+`<div class="card"><div class="tbl-wrap"><table class="tbl">
+    <thead><tr><th>الصنف</th><th>المتاح</th><th>استهلاك ${consWin}ي</th><th>معدل/يوم</th><th>متوقع شهري</th><th>يكفي</th><th>آخر بيع</th></tr></thead>
+    <tbody>${rows.length?rows.map(r=>{const dc=r.days_cover==null?null:+r.days_cover;return `<tr>
+      <td style="font-weight:600">${esc(r.name||'—')}${r.name_ar?`<div style="font-size:11px;color:var(--muted)">${esc(r.name_ar)}</div>`:''}</td>
+      <td class="num" style="${+r.stock<=0?'color:var(--danger);font-weight:700':''}">${num(r.stock)}</td>
+      <td class="num"><b>${num(r.cons)}</b></td>
+      <td class="num">${num(r.avg_daily)}</td>
+      <td class="num">${num(r.monthly)}</td>
+      <td class="num">${dc==null?'—':`<span class="pill ${dc<=7?'r':dc<=21?'w':'n'}">${num(dc)} يوم</span>`}</td>
+      <td class="num" style="font-size:12px">${esc(r.last_sold||'—')}</td>
+    </tr>`}).join(''):`<tr><td colspan=7><div class="empty">${icon('dash',44)}<div>لا بيانات · بتظهر بعد مزامنة معدلات البيع</div></div></td></tr>`}</tbody>
+  </table></div></div>
+  ${rows.length?`<p style="color:var(--muted);font-size:12px;margin-top:8px">${num(rows.length)} صنف · إجمالي استهلاك الفترة ${num(tC)} وحدة · الألوان: 🔴 أقل من أسبوع · 🟡 أقل من ٣ أسابيع</p>`:''}`;
+  wireCQ();
+}
+function wireCQ(){const q=$('#cq');if(q)q.oninput=e=>{consQ=e.target.value;clearTimeout(rT);rT=setTimeout(loadConsume,300)};}
+function copyConsume(){
+  if(!consData||!consData.length)return toast('مفيش بيانات','err');
+  const txt=`تقرير معدلات الاستهلاك (آخر ${consWin} يوم)\n\n`+consData.map(r=>`${r.name}: استهلاك ${num(r.cons)} · معدل ${num(r.avg_daily)}/يوم · متاح ${num(r.stock)}${r.days_cover!=null?` · يكفي ${num(r.days_cover)} يوم`:''}`).join('\n');
+  (navigator.clipboard?navigator.clipboard.writeText(txt):Promise.reject()).then(()=>toast('اتنسخ التقرير ✓','ok')).catch(()=>prompt('انسخ التقرير:',txt));
 }
 function loadPurchSuggest(){
   const my=++purchReq;

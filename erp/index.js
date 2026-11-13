@@ -586,6 +586,38 @@ app.get('/api/purchases', auth, async (req, res) => {
 });
 
 // ملخّص الحضور اليوم + عدد الموظفين (للوحة التحكم إن احتجناه لاحقًا)
+// تقرير معدلات الاستهلاك — كل الأصناف اللي بتتحرك، بفترة (٣٠/٩٠ يوم)
+app.get('/api/consumption', auth, async (req, res) => {
+  try {
+    const win = req.query.days === '90' ? 90 : 30;
+    const qcol = win === 90 ? 'q90' : 'q30';
+    const lim = Math.min(1000, Math.max(1, parseInt(req.query.limit, 10) || 300));
+    const sortCover = req.query.sort === 'cover';
+    const toks = String(req.query.q || '').trim().split(/\s+/).filter(Boolean).slice(0, 6).map(arNorm).filter(Boolean);
+    const SA = SCOLS ? 'i.sall' : AR_NORM_SQL.replace(/data->>/g, "i.data->>");
+    const consE = `COALESCE(NULLIF(s.data->>'${qcol}','')::numeric,0)`;
+    const stockE = `COALESCE(NULLIF(i.data->>'stock','')::numeric,0)`;
+    const avgE = `(${consE}/${win}.0)`;
+    const P = []; const p = v => { P.push(v); return '$' + P.length; };
+    let where = `i.col='items' AND NOT i.deleted AND ${consE} > 0`;
+    toks.forEach(t => { where += ` AND ${SA} LIKE ${p('%' + t + '%')}`; });
+    P.push(lim);
+    const sql = `SELECT i.data->>'name' AS name, i.data->>'name_ar' AS name_ar, i.data->>'barcode' AS barcode,
+        ${stockE} AS stock,
+        COALESCE(NULLIF(s.data->>'q30','')::numeric,0) AS q30,
+        COALESCE(NULLIF(s.data->>'q90','')::numeric,0) AS q90,
+        ${consE} AS cons, ROUND(${avgE},2) AS avg_daily, ROUND(${avgE}*30,1) AS monthly,
+        CASE WHEN ${avgE}>0 THEN ROUND(${stockE}/${avgE},0) ELSE NULL END AS days_cover,
+        s.data->>'last_sold' AS last_sold
+      FROM docs i LEFT JOIN docs s ON s.col='istats' AND s.id=i.id
+      WHERE ${where}
+      ORDER BY ${sortCover ? `CASE WHEN ${avgE}>0 THEN ${stockE}/${avgE} ELSE 999999 END ASC` : `${consE} DESC`}
+      LIMIT $${P.length}`;
+    const rows = (await pool.query(sql, P)).rows;
+    res.json({ win, rows });
+  } catch (e) { res.status(500).json({ error: 'consumption', detail: e.message }); }
+});
+
 app.get('/api/stock-summary', auth, async (_req, res) => {
   try {
     const out = await memo('stock', 60000, async () => {
