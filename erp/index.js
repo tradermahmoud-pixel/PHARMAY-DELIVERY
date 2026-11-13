@@ -15,7 +15,9 @@ const SCHEMA = (process.env.ERP_SCHEMA || 'saydaliya').replace(/[^a-zA-Z0-9_]/g,
    والكاف والياء الفارسية، والأرقام العربية↔اللاتينية (٥٠٠ = 500). */
 const NORM_FROM = 'أإآىئؤةکی٠١٢٣٤٥٦٧٨٩';
 const NORM_TO = 'اااييوهكي0123456789';
-function normSql(expr) { return `lower(translate(regexp_replace(${expr}, '[ًٌٍَُِّْـء]', '', 'g'), '${NORM_FROM}', '${NORM_TO}'))`; }
+// يشيل التشكيل والهمزة، ثم علامات الترقيم (شرطة/نقطة/قوس/شرطة سفلية…) لتوحيد مثل URI-VIN = URIVIN، ثم يوحّد الحروف/الأرقام
+function normSql(expr) { return `lower(translate(regexp_replace(regexp_replace(${expr}, '[ًٌٍَُِّْـء]', '', 'g'), '[-./()+_'',*&]', '', 'g'), '${NORM_FROM}', '${NORM_TO}'))`; }
+const SEARCH_VER = '3'; // ابعته كل ما يتغيّر تعبير normSql عشان الأعمدة المخزّنة تتبني من جديد
 let SCOLS = false; // هل أعمدة البحث المخزّنة (sname/sall) متاحة؟ بتتحدد في migrate
 
 const app = express();
@@ -89,10 +91,18 @@ async function migrate() {
       created_at bigint NOT NULL, last_seen bigint NOT NULL);
   `);
   // أعمدة بحث مطبّعة مخزّنة (Postgres يحافظ عليها تلقائيًا) — بدل حساب التطبيع لكل صنف في كل استعلام
-  // sname = الاسم مطبّع، sall = اسم+باركود+مسلسل مطبّع. منتظرة قبل الإقلاع عشان البحث يعتمد عليها.
+  // sname = الاسم مطبّع، sall = اسم+باركود+مسلسل مطبّع. تتبني مرة واحدة، وتتعاد لو اتغيّر تعبير التطبيع (SEARCH_VER).
   try {
-    await pool.query(`ALTER TABLE docs ADD COLUMN IF NOT EXISTS sname text GENERATED ALWAYS AS (${normSql("COALESCE(data->>'name','')")}) STORED`);
-    await pool.query(`ALTER TABLE docs ADD COLUMN IF NOT EXISTS sall text GENERATED ALWAYS AS (${normSql("COALESCE(data->>'name','')||' '||COALESCE(data->>'barcode','')||' '||COALESCE(data->>'serial','')")}) STORED`);
+    await pool.query(`CREATE TABLE IF NOT EXISTS erp_meta(k text PRIMARY KEY, v text)`);
+    const cur = (await pool.query(`SELECT v FROM erp_meta WHERE k='search_cols_ver'`)).rows[0];
+    if (!cur || cur.v !== SEARCH_VER) {
+      await pool.query(`ALTER TABLE docs DROP COLUMN IF EXISTS sname`);
+      await pool.query(`ALTER TABLE docs DROP COLUMN IF EXISTS sall`);
+      await pool.query(`ALTER TABLE docs ADD COLUMN sname text GENERATED ALWAYS AS (${normSql("COALESCE(data->>'name','')")}) STORED`);
+      await pool.query(`ALTER TABLE docs ADD COLUMN sall text GENERATED ALWAYS AS (${normSql("COALESCE(data->>'name','')||' '||COALESCE(data->>'barcode','')||' '||COALESCE(data->>'serial','')")}) STORED`);
+      await pool.query(`INSERT INTO erp_meta(k,v) VALUES('search_cols_ver',$1) ON CONFLICT(k) DO UPDATE SET v=$1`, [SEARCH_VER]);
+      console.log('[erp] search columns rebuilt to ver', SEARCH_VER);
+    }
     SCOLS = true; console.log('[erp] search columns ready');
   } catch (e) { SCOLS = false; console.warn('[erp] search columns unavailable (fallback to expressions):', (e.message || '').split('\n')[0]); }
   // فهارس الأداء (best-effort — أي فشل ما يوقفش الإقلاع) — تسرّع البحث والتجميعات مع كبر البيانات
@@ -434,7 +444,7 @@ app.post('/api/delivery-assign', auth, async (req, res) => {
 // توحيد عربي: إزالة التشكيل والهمزات وتوحيد الألف/الياء/التاء المربوطة — في SQL وفي Node بنفس الطريقة
 const AR_NORM_SQL = normSql("COALESCE(data->>'name','')||' '||COALESCE(data->>'barcode','')||' '||COALESCE(data->>'serial','')");
 const NAME_NORM_SQL = normSql("COALESCE(data->>'name','')");
-function arNorm(s){ return String(s||'').toLowerCase().replace(/[ًٌٍَُِّْـء]/g,'').replace(/[أإآ]/g,'ا').replace(/[ىئی]/g,'ي').replace(/ؤ/g,'و').replace(/ة/g,'ه').replace(/ک/g,'ك').replace(/[٠-٩]/g,d=>String('٠١٢٣٤٥٦٧٨٩'.indexOf(d))).trim(); }
+function arNorm(s){ return String(s||'').toLowerCase().replace(/[ًٌٍَُِّْـء]/g,'').replace(/[-./()+_'*&,]/g,'').replace(/[أإآ]/g,'ا').replace(/[ىئی]/g,'ي').replace(/ؤ/g,'و').replace(/ة/g,'ه').replace(/ک/g,'ك').replace(/[٠-٩]/g,d=>String('٠١٢٣٤٥٦٧٨٩'.indexOf(d))).trim(); }
 
 /* بحث الأصناف الموحّد (نقطة البيع + المخزون) — دقيق ومتوقّع:
    الأساس: كل كلمة لازم تكون *جزء فعلي (substring)* من النص (اسم+باركود+مسلسل) — مفيش تقارب يجيب حاجة غلط.
@@ -456,20 +466,8 @@ async function searchItems(raw, o) {
   const conds = toks.map(t => `${SA} LIKE ${p('%' + t + '%')}`);
   const wstart = toks.map(t => `(${SN} LIKE ${p(t + '%')} OR ${SN} LIKE ${p('% ' + t + '%')})`).join(' AND ');
   const rank = `CASE WHEN ${SN} LIKE ${p(qf + '%')} THEN 0 WHEN ${SN} LIKE ${p('% ' + qf + '%')} THEN 1 WHEN ${wstart} THEN 2 ELSE 3 END`;
-  let rows = (await pool.query(
+  const rows = (await pool.query(
     `SELECT id,data FROM docs WHERE ${B} AND ${conds.join(' AND ')} ORDER BY ${rank}, ${SN} LIMIT ${p(lim)} OFFSET ${p(off)}`, P)).rows;
-  // ملاذ أخير: كلمة واحدة بدون أي نتيجة → تقارب لأخطاء الكتابة فقط (augmantin→augmentin)
-  if (rows.length || off > 0 || toks.length !== 1 || qf.length < 3) return rows;
-  const c = await pool.connect();
-  try {
-    await c.query('BEGIN');
-    await c.query(`SET LOCAL search_path TO "${SCHEMA}"`);
-    await c.query('SET LOCAL pg_trgm.word_similarity_threshold = 0.5');
-    rows = (await c.query(
-      `SELECT id,data FROM docs WHERE ${B} AND $1 <% ${SN} ORDER BY word_similarity($1, ${SN}) DESC, ${SN} LIMIT $2`, [qf, lim])).rows;
-    await c.query('COMMIT');
-  } catch (e) { await c.query('ROLLBACK').catch(() => {}); }
-  finally { c.release(); }
   return rows;
 }
 
