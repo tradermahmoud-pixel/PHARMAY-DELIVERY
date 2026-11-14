@@ -206,7 +206,7 @@ app.get('/api/sync', auth, async (req, res) => {
   const since = parseInt(req.query.since, 10) || 0;
   // الفواتير والأصناف مش بتتزامن للعميل (كتير جدًا) — بتتقرى من endpoints مخصصة عشان الأداء
   const { rows } = await pool.query(
-    "SELECT col,id,data,deleted,seq FROM docs WHERE seq>$1 AND col NOT IN ('sales','items','customers','istats','attendance','gpur','fin_daily') ORDER BY seq LIMIT 20000", [since]);
+    "SELECT col,id,data,deleted,seq FROM docs WHERE seq>$1 AND col NOT IN ('sales','items','customers','istats','attendance','gpur','fin_daily','sret','pret','vled','cled','cheques') ORDER BY seq LIMIT 20000", [since]);
   let seq = since;
   const docs = rows.map(r => { if (r.seq > seq) seq = Number(r.seq); return r.deleted ? { c: r.col, i: r.id, x: true } : { c: r.col, i: r.id, d: r.data }; });
   // تقديم المؤشر لتخطّي مستندات الفواتير المستبعَدة (طالما مفيش صفحة ممتلئة)
@@ -218,7 +218,7 @@ app.get('/api/sync', auth, async (req, res) => {
 });
 
 /* صلاحيات الشاشات + سجل التعديلات */
-const PERM_KEYS = ['dash', 'pos', 'invoices', 'delivery', 'items', 'purch', 'fin', 'cust', 'vend', 'cash', 'emp', 'usr', 'audit'];
+const PERM_KEYS = ['dash', 'pos', 'invoices', 'delivery', 'items', 'purch', 'returns', 'fin', 'statements', 'cheques', 'cust', 'vend', 'cash', 'emp', 'usr', 'audit'];
 function userPerms(u) {
   if (u.owner) return PERM_KEYS.slice();
   if (Array.isArray(u.perms)) return u.perms.filter(k => PERM_KEYS.includes(k));
@@ -705,6 +705,70 @@ app.get('/api/purchases', auth, async (req, res) => {
     const { rows } = await pool.query(`SELECT id,data FROM docs WHERE ${where} ORDER BY COALESCE(NULLIF(data->>'ts','')::bigint,0) DESC LIMIT $${params.length}`, params);
     res.json(rows.map(r => Object.assign({ id: r.id }, r.data)));
   } catch (e) { res.status(500).json({ error: 'purchases', detail: e.message }); }
+});
+
+// المرتجعات — مبيعات (sret) أو مشتريات (pret) مع إجماليات الفترة
+app.get('/api/returns', auth, async (req, res) => {
+  try {
+    const kind = req.query.type === 'purch' ? 'pret' : 'sret';
+    const days = Math.min(730, Math.max(1, parseInt(req.query.days, 10) || 30));
+    const lim = Math.min(500, Math.max(1, parseInt(req.query.limit, 10) || 300));
+    const params = [days];
+    let where = `col='${kind}' AND NOT deleted AND (data->>'date') >= to_char(now() - ($1::int * interval '1 day'),'YYYY-MM-DD')`;
+    const q = String(req.query.q || '').trim();
+    if (q) {
+      params.push('%' + q + '%');
+      where += kind === 'sret'
+        ? ` AND (COALESCE(data->>'customer','') ILIKE $${params.length} OR data->>'bill' ILIKE $${params.length} OR data->>'no' ILIKE $${params.length})`
+        : ` AND (COALESCE(data->>'vendor','') ILIKE $${params.length} OR COALESCE(data->>'items','') ILIKE $${params.length} OR data->>'no' ILIKE $${params.length})`;
+    }
+    const valExpr = kind === 'sret' ? "COALESCE((data->>'ret_value')::numeric,0)" : "COALESCE((data->>'total')::numeric,0)";
+    const tot = await pool.query(`SELECT count(*)::int n, COALESCE(SUM(${valExpr}),0) v FROM docs WHERE ${where}`, params);
+    params.push(lim);
+    const { rows } = await pool.query(`SELECT id,data FROM docs WHERE ${where} ORDER BY COALESCE(NULLIF(data->>'ts','')::bigint,0) DESC LIMIT $${params.length}`, params);
+    res.json({ count: tot.rows[0].n, total: Number(tot.rows[0].v), rows: rows.map(r => Object.assign({ id: r.id }, r.data)) });
+  } catch (e) { res.status(500).json({ error: 'returns', detail: e.message }); }
+});
+
+// كشوف الحساب — قائمة الأطراف بأرصدتها، أو كشف طرف واحد (حركات الرصيد)
+app.get('/api/statements', auth, async (req, res) => {
+  try {
+    const led = req.query.kind === 'vend' ? 'vled' : 'cled';
+    const party = String(req.query.party || '').trim();
+    if (!party) {
+      // قائمة الأطراف: آخر رصيد لكل طرف + عدد الحركات (من آخر حركة)
+      const { rows } = await pool.query(
+        `SELECT DISTINCT ON (data->>'party') data->>'party' AS party,
+                (data->>'new')::numeric AS bal, (data->>'ts')::bigint AS ts
+         FROM docs WHERE col='${led}' AND NOT deleted AND data->>'party' IS NOT NULL
+         ORDER BY data->>'party', COALESCE((data->>'ts')::bigint,0) DESC`);
+      // أسماء الأطراف من مجموعة العملاء/الموردين
+      const pcol = led === 'vled' ? 'vendors' : 'customers';
+      const nm = await pool.query(`SELECT id, data->>'name' name, data->>'phone' phone FROM docs WHERE col='${pcol}' AND NOT deleted`);
+      const names = {}; nm.rows.forEach(r => names[r.id] = { name: r.name, phone: r.phone });
+      res.json(rows.map(r => ({ party: r.party, name: (names[r.party] || {}).name || r.party, phone: (names[r.party] || {}).phone || '', balance: Number(r.bal) || 0, ts: Number(r.ts) || 0 }))
+        .sort((a, b) => Math.abs(b.balance) - Math.abs(a.balance)));
+    } else {
+      const { rows } = await pool.query(
+        `SELECT data FROM docs WHERE col='${led}' AND NOT deleted AND data->>'party'=$1
+         ORDER BY COALESCE((data->>'ts')::bigint,0) ASC`, [party]);
+      res.json({ party, rows: rows.map(r => r.data) });
+    }
+  } catch (e) { res.status(500).json({ error: 'statements', detail: e.message }); }
+});
+
+// الشيكات — واردة (من العملاء)
+app.get('/api/cheques', auth, async (req, res) => {
+  try {
+    const days = Math.min(730, Math.max(1, parseInt(req.query.days, 10) || 90));
+    const params = [days];
+    let where = `col='cheques' AND NOT deleted AND (data->>'date') >= to_char(now() - ($1::int * interval '1 day'),'YYYY-MM-DD')`;
+    const q = String(req.query.q || '').trim();
+    if (q) { params.push('%' + q + '%'); where += ` AND (COALESCE(data->>'party','') ILIKE $${params.length} OR data->>'bill' ILIKE $${params.length})`; }
+    const tot = await pool.query(`SELECT count(*)::int n, COALESCE(SUM(COALESCE((data->>'value')::numeric,0)),0) v FROM docs WHERE ${where}`, params);
+    const { rows } = await pool.query(`SELECT id,data FROM docs WHERE ${where} ORDER BY COALESCE(NULLIF(data->>'ts','')::bigint,0) DESC LIMIT 500`, params);
+    res.json({ count: tot.rows[0].n, total: Number(tot.rows[0].v), rows: rows.map(r => Object.assign({ id: r.id }, r.data)) });
+  } catch (e) { res.status(500).json({ error: 'cheques', detail: e.message }); }
 });
 
 // ملخّص الحضور اليوم + عدد الموظفين (للوحة التحكم إن احتجناه لاحقًا)
