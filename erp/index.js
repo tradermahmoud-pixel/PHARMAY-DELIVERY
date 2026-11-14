@@ -89,6 +89,10 @@ async function migrate() {
     CREATE TABLE IF NOT EXISTS sessions (
       token text PRIMARY KEY, user_id text NOT NULL REFERENCES users(id) ON DELETE CASCADE,
       created_at bigint NOT NULL, last_seen bigint NOT NULL);
+    ALTER TABLE users ADD COLUMN IF NOT EXISTS perms jsonb;
+    CREATE TABLE IF NOT EXISTS audit (
+      id bigserial PRIMARY KEY, user_id text, user_name text, action text, detail text, at bigint NOT NULL);
+    CREATE INDEX IF NOT EXISTS audit_at_idx ON audit (at DESC);
   `);
   // أعمدة بحث مطبّعة مخزّنة (Postgres يحافظ عليها تلقائيًا) — بدل حساب التطبيع لكل صنف في كل استعلام
   // sname = الاسم مطبّع، sall = اسم+باركود+مسلسل مطبّع. تتبني مرة واحدة، وتتعاد لو اتغيّر تعبير التطبيع (SEARCH_VER).
@@ -178,6 +182,7 @@ app.post('/api/login', async (req, res) => {
     const tok = crypto.randomBytes(32).toString('base64url');
     await pool.query('INSERT INTO sessions(token,user_id,created_at,last_seen) VALUES($1,$2,$3,$3)', [tok, rows[0].id, now()]);
     res.setHeader('Set-Cookie', `${COOKIE}=${tok}; Path=${base(req)}; HttpOnly; SameSite=Lax; Max-Age=${SESSION_DAYS * 86400}${req.secure ? '; Secure' : ''}`);
+    logAudit(rows[0], 'login', 'تسجيل دخول');
     res.json({ ok: true });
   } catch (e) { res.status(503).json({ error: 'server' }); }
 });
@@ -189,11 +194,12 @@ app.post('/api/logout', async (req, res) => {
 });
 
 app.get('/api/me', auth, (req, res) =>
-  res.json({ id: req.user.id, name: req.user.name, username: req.user.username, role: req.user.role, owner: req.user.owner }));
+  res.json({ id: req.user.id, name: req.user.name, username: req.user.username, role: req.user.role, owner: req.user.owner, perms: userPerms(req.user) }));
 
-app.get('/api/users', auth, async (_req, res) => {
-  const { rows } = await pool.query('SELECT id,name,username,role,owner,disabled FROM users ORDER BY created_at');
-  res.json(rows);
+app.get('/api/users', auth, async (req, res) => {
+  if (!req.user.owner) return res.status(403).json({ error: 'للمالك فقط' });
+  const { rows } = await pool.query('SELECT id,name,username,role,owner,disabled,perms,created_at FROM users ORDER BY created_at');
+  res.json(rows.map(r => ({ id: r.id, name: r.name, username: r.username, role: r.role, owner: r.owner, disabled: r.disabled, perms: userPerms(r), created_at: Number(r.created_at) || 0 })));
 });
 
 app.get('/api/sync', auth, async (req, res) => {
@@ -210,6 +216,20 @@ app.get('/api/sync', auth, async (req, res) => {
   }
   res.json({ full: since === 0, docs, seq });
 });
+
+/* صلاحيات الشاشات + سجل التعديلات */
+const PERM_KEYS = ['dash', 'pos', 'invoices', 'delivery', 'items', 'purch', 'fin', 'cust', 'vend', 'cash', 'emp', 'usr', 'audit'];
+function userPerms(u) {
+  if (u.owner) return PERM_KEYS.slice();
+  if (Array.isArray(u.perms)) return u.perms.filter(k => PERM_KEYS.includes(k));
+  return ['dash', 'pos', 'items', 'invoices']; // افتراضي للكاشير القديم
+}
+async function logAudit(user, action, detail) {
+  try {
+    await pool.query('INSERT INTO audit(user_id,user_name,action,detail,at) VALUES($1,$2,$3,$4,$5)',
+      [user && user.id || null, user && user.name || '', String(action).slice(0, 80), String(detail || '').slice(0, 400), now()]);
+  } catch (e) {}
+}
 
 /* كاش بسيط للملخّصات — يخفّف المسح المتكرر على السيرفر المجاني (يتصفّر عند أي كتابة) */
 const _sum = new Map();
@@ -296,22 +316,94 @@ app.post('/api/write', auth, async (req, res) => {
     }
     await client.query('COMMIT');
     bustSummaries();
+    // سجل التعديلات — ملخّص مختصر لكل كتابة (نتجاهل تحديثات الحالة كتيرة التكرار)
+    try {
+      const names = { sales: 'فاتورة', customers: 'عميل', vendors: 'مورد', cash: 'حركة خزنة', settings: 'إعدادات', users: 'مستخدم' };
+      const g = {};
+      for (const o of out) { const c = o.c; if (!names[c]) continue; (g[c] = g[c] || { add: 0, del: 0 }); if (o.x) g[c].del++; else g[c].add++; }
+      const parts = Object.keys(g).map(c => `${names[c]}: ${g[c].add ? 'حفظ ' + g[c].add : ''}${g[c].del ? ' حذف ' + g[c].del : ''}`.trim());
+      if (parts.length) logAudit(req.user, 'write', parts.join('، '));
+    } catch (e) {}
     res.json({ docs: out });
   } catch (e) { await client.query('ROLLBACK').catch(() => {}); res.status(500).json({ error: 'write' }); }
   finally { client.release(); }
 });
 
+function cleanPerms(p) { return Array.isArray(p) ? [...new Set(p.filter(k => PERM_KEYS.includes(k)))] : null; }
+
 app.post('/api/users', auth, async (req, res) => {
   if (!req.user.owner) return res.status(403).json({ error: 'للمالك فقط' });
-  const { username, name, password, role } = req.body || {};
+  const { username, name, password, role, perms } = req.body || {};
   const u = String(username || '').trim().toLowerCase();
   if (!/^[a-z0-9_.-]{2,32}$/.test(u)) return res.status(400).json({ error: 'اسم مستخدم غير صالح' });
   if (!password || password.length < 6) return res.status(400).json({ error: 'كلمة المرور 6 أحرف على الأقل' });
+  const isOwner = role === 'owner';
+  const pj = isOwner ? null : cleanPerms(perms);
   try {
-    await pool.query('INSERT INTO users(id,username,name,pass,role,created_at) VALUES($1,$2,$3,$4,$5,$6)',
-      [uidGen(), u, String(name || u), hashPw(password), role === 'owner' ? 'owner' : (role || 'cashier'), now()]);
+    await pool.query('INSERT INTO users(id,username,name,pass,role,owner,perms,created_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8)',
+      [uidGen(), u, String(name || u), hashPw(password), isOwner ? 'owner' : (role || 'cashier'), isOwner, pj ? JSON.stringify(pj) : null, now()]);
+    logAudit(req.user, 'user.add', `إضافة مستخدم: ${name || u} (${u})`);
     res.json({ ok: true });
   } catch (e) { res.status(400).json({ error: 'الاسم مستخدم بالفعل' }); }
+});
+
+app.patch('/api/users/:id', auth, async (req, res) => {
+  if (!req.user.owner) return res.status(403).json({ error: 'للمالك فقط' });
+  const id = String(req.params.id);
+  try {
+    const cur = await pool.query('SELECT * FROM users WHERE id=$1', [id]);
+    const t = cur.rows[0];
+    if (!t) return res.status(404).json({ error: 'غير موجود' });
+    const b = req.body || {};
+    const sets = [], vals = []; let n = 1;
+    const log = [];
+    if (b.name != null && String(b.name).trim()) { sets.push(`name=$${n++}`); vals.push(String(b.name).trim()); log.push('الاسم'); }
+    if (b.role != null && !t.owner) { const r = b.role === 'owner' ? 'owner' : (b.role || 'cashier'); sets.push(`role=$${n++}`); vals.push(r); sets.push(`owner=$${n++}`); vals.push(r === 'owner'); log.push('الدور'); }
+    if (b.perms != null && !t.owner) { const pj = cleanPerms(b.perms); sets.push(`perms=$${n++}`); vals.push(pj ? JSON.stringify(pj) : null); log.push('الصلاحيات'); }
+    if (b.disabled != null) {
+      if (t.owner && b.disabled) return res.status(400).json({ error: 'لا يمكن تعطيل المالك' });
+      sets.push(`disabled=$${n++}`); vals.push(!!b.disabled); log.push(b.disabled ? 'تعطيل' : 'تفعيل');
+    }
+    if (b.password != null && String(b.password)) {
+      if (String(b.password).length < 6) return res.status(400).json({ error: 'كلمة المرور 6 أحرف على الأقل' });
+      sets.push(`pass=$${n++}`); vals.push(hashPw(String(b.password))); log.push('كلمة المرور');
+      await pool.query('DELETE FROM sessions WHERE user_id=$1', [id]).catch(() => {});
+    }
+    if (!sets.length) return res.json({ ok: true });
+    vals.push(id);
+    await pool.query(`UPDATE users SET ${sets.join(',')} WHERE id=$${n}`, vals);
+    logAudit(req.user, 'user.edit', `تعديل ${t.name || t.username}: ${log.join('، ')}`);
+    res.json({ ok: true });
+  } catch (e) { res.status(500).json({ error: 'تعذّر الحفظ' }); }
+});
+
+app.delete('/api/users/:id', auth, async (req, res) => {
+  if (!req.user.owner) return res.status(403).json({ error: 'للمالك فقط' });
+  const id = String(req.params.id);
+  if (id === req.user.id) return res.status(400).json({ error: 'لا يمكن حذف نفسك' });
+  try {
+    const cur = await pool.query('SELECT name,username,owner FROM users WHERE id=$1', [id]);
+    const t = cur.rows[0];
+    if (!t) return res.status(404).json({ error: 'غير موجود' });
+    if (t.owner) {
+      const oc = await pool.query('SELECT count(*)::int c FROM users WHERE owner=true AND disabled=false');
+      if (oc.rows[0].c <= 1) return res.status(400).json({ error: 'لا يمكن حذف آخر مالك' });
+    }
+    await pool.query('DELETE FROM sessions WHERE user_id=$1', [id]).catch(() => {});
+    await pool.query('DELETE FROM users WHERE id=$1', [id]);
+    logAudit(req.user, 'user.del', `حذف مستخدم: ${t.name || t.username}`);
+    res.json({ ok: true });
+  } catch (e) { res.status(500).json({ error: 'تعذّر الحذف' }); }
+});
+
+app.get('/api/audit', auth, async (req, res) => {
+  if (!req.user.owner) return res.status(403).json({ error: 'للمالك فقط' });
+  try {
+    const lim = Math.min(500, Math.max(1, parseInt(req.query.limit, 10) || 200));
+    const off = Math.max(0, parseInt(req.query.offset, 10) || 0);
+    const { rows } = await pool.query('SELECT user_name,action,detail,at FROM audit ORDER BY at DESC LIMIT $1 OFFSET $2', [lim, off]);
+    res.json(rows.map(r => ({ user: r.user_name, action: r.action, detail: r.detail, at: Number(r.at) })));
+  } catch (e) { res.status(500).json({ error: 'audit', detail: e.message }); }
 });
 
 /* ---- Genius mirror ingest (token-protected bulk upsert; no DB exposure) ---- */

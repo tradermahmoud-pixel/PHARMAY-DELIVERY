@@ -17,6 +17,7 @@
     api,
     post: (p, b) => api(p, { method: 'POST', headers: H, body: JSON.stringify(b || {}) }),
     patch: (p, b) => api(p, { method: 'PATCH', headers: H, body: JSON.stringify(b || {}) }),
+    del: (p) => api(p, { method: 'DELETE', headers: H }),
     me: null, users: [],
     async loadUsers() { try { this.users = await api('/api/users'); } catch (e) {} return this.users; },
     async logout() { try { await this.post('/api/logout'); } catch (e) {} try { await IDB.set(CK, null); } catch (e) {} location.href = B + '/login'; },
