@@ -1219,23 +1219,28 @@ function vCashGenius(v,tog){
 function renderCashGenius(){
   const b=$('#cgBody');if(!b)return;const j=cashGen;
   if(j===null){b.innerHTML=`<div class="empty">${icon('cash',44)}<div>بحمّل…</div></div>`;return;}
-  if(!j.available){b.innerHTML=`<div class="empty">${icon('cash',44)}<div>لسه مفيش بيانات خزنة من Genius.<br>شغّل المزامنة بالنسخة الجديدة. لو فضلت فاضية، جدول الخزنة أعمدته مختلفة — شغّل <b>--schema-all</b> وابعتهولي.</div></div>`;return;}
-  const mv=j.movements||[];
-  b.innerHTML=`<div class="kpis" style="grid-template-columns:repeat(auto-fill,minmax(180px,1fr))">
-    <div class="kpi accent"><div class="t">${icon('cash')} رصيد الخزنة الفعلي</div><div class="v">${money(j.balance)}</div></div>
-    <div class="kpi"><div class="t">وارد اليوم</div><div class="v" style="color:var(--ok)">${money(j.in_today)}</div></div>
-    <div class="kpi"><div class="t">منصرف اليوم</div><div class="v" style="color:var(--danger)">${money(j.out_today)}</div></div>
+  if(!j.available){b.innerHTML=`<div class="empty">${icon('cash',44)}<div>لسه مفيش بيانات خزنة من Genius.<br>شغّل المزامنة بالنسخة الجديدة (<b>--once</b>).</div></div>`;return;}
+  const dr=j.drawers||[], mv=j.movements||[];
+  b.innerHTML=`<div class="kpis" style="grid-template-columns:repeat(auto-fill,minmax(190px,1fr));margin-bottom:12px">
+    <div class="kpi accent"><div class="t">${icon('cash')} إجمالي رصيد الخزائن</div><div class="v">${money(j.balance)}</div><div class="s">${num(dr.filter(d=>d.active).length)} خزنة نشطة</div></div>
   </div>
-  <div class="card"><div class="tbl-wrap"><table class="tbl">
+  <div class="card"><div style="font-weight:700;margin-bottom:8px">${icon('cash')} أرصدة الخزائن والبنوك</div><div class="tbl-wrap"><table class="tbl">
+    <thead><tr><th>الخزنة / البنك</th><th>الحالة</th><th>الرصيد الحالي</th></tr></thead>
+    <tbody>${dr.length?dr.map(d=>`<tr>
+      <td style="font-weight:600">${esc(d.name||'—')}</td>
+      <td>${d.active?'<span class="pill g">نشطة</span>':'<span class="pill n">متوقفة</span>'}</td>
+      <td class="num"><b style="color:${(+d.balance||0)<0?'var(--danger)':'inherit'}">${moneyp(d.balance)}</b></td>
+    </tr>`).join(''):`<tr><td colspan=3><div class="empty">لا خزائن</div></td></tr>`}</tbody>
+  </table></div></div>
+  ${mv.length?`<div class="card" style="margin-top:14px"><div style="font-weight:700;margin-bottom:8px">آخر حركات الخزنة</div><div class="tbl-wrap"><table class="tbl">
     <thead><tr><th>التاريخ</th><th>البيان</th><th>وارد</th><th>منصرف</th><th>الرصيد</th></tr></thead>
-    <tbody>${mv.length?mv.map(m=>{const d=+m.delta||0;return `<tr>
+    <tbody>${mv.map(m=>{const d=+m.delta||0;return `<tr>
       <td class="num" dir="ltr" style="text-align:right;white-space:nowrap">${esc(m.date||'')}</td>
       <td style="color:var(--muted);font-size:12.5px">${esc(m.op||'—')}</td>
-      <td class="num" style="color:var(--ok);font-weight:600">${d>0?moneyp(d):''}</td>
-      <td class="num" style="color:var(--danger);font-weight:600">${d<0?moneyp(-d):''}</td>
+      <td class="num" style="color:var(--ok)">${d>0?moneyp(d):''}</td>
+      <td class="num" style="color:var(--danger)">${d<0?moneyp(-d):''}</td>
       <td class="num"><b>${moneyp(m.new)}</b></td>
-    </tr>`}).join(''):`<tr><td colspan=5><div class="empty">لا حركات في الفترة</div></td></tr>`}</tbody>
-  </table></div></div>`;
+    </tr>`}).join('')}</tbody></table></div></div>`:''}`;
 }
 function cashMove(type){
   modal(type==='in'?'إيداع في الخزنة':'صرف من الخزنة',`
@@ -1412,7 +1417,21 @@ function renderStockCard(){
 }
 
 /* ---------- الحسابات الختامية ---------- */
-let accFrom='', accTo='', accData=null, accReq=0, accTab='pl';
+let accFrom='', accTo='', accData=null, accReq=0, accTab='pl', chartData=null, chartReq=0;
+function loadChart(){
+  const my=++chartReq;
+  fetch((window.__BASE__||'')+'/api/chart-of-accounts',{credentials:'same-origin'}).then(r=>r.ok?r.json():null).then(j=>{if(my!==chartReq)return;chartData=j||{available:false,tree:[]};if(route==='accounts'&&accTab==='tree')renderAccounts();}).catch(()=>{if(my===chartReq){chartData={available:false,tree:[]};renderAccounts();}});
+}
+function countNodes(nodes){let n=0;(nodes||[]).forEach(x=>{n+=1+countNodes(x.children)});return n;}
+function chartRows(nodes,lvl,out){
+  nodes.forEach(n=>{
+    const leaf=!n.children||!n.children.length;
+    const amt=leaf?n.own:n.total;
+    out.push(`<div class="acc-line" style="${lvl===0?'background:var(--surface2)':''}"><span style="padding-right:${lvl*18}px;${lvl===0?'font-weight:700':lvl===1?'font-weight:600':'color:var(--muted)'}">${n.code?`<span style="color:var(--muted);font-size:11px">${esc(n.code)}</span> `:''}${esc(n.name)}</span><b class="num" style="${lvl===0?'font-weight:700':''}">${moneyp(amt)}</b></div>`);
+    if(!leaf)chartRows(n.children,lvl+1,out);
+  });
+  return out;
+}
 function vAccounts(v){
   if(!accFrom||!accTo){const t=new Date();accTo=t.toISOString().slice(0,10);const f=new Date(t);f.setDate(f.getDate()-29);accFrom=f.toISOString().slice(0,10);}
   const DS=[[30,'شهر'],[90,'٣ شهور'],[365,'سنة']];
@@ -1467,28 +1486,35 @@ function renderAccounts(){
       <p style="color:var(--muted);font-size:12px;margin:12px 0 0">قيمة المخزون بالتكلفة محسوبة من متوسط تكلفة بيع كل صنف. قيمة المخزون بسعر البيع: ${moneyp(bs.inventory_sell)}.</p>
     </div>`;
   }else{
-    const rows=[
-      ['الإيرادات',p.net_sales,'rev',0],
-      ['إجمالي المبيعات',p.revenue,'',1],['الخصومات',-p.discount,'',1],['مرتجعات المبيعات',-p.sales_returns,'',1],
-      ['تكلفة البضاعة المباعة',-p.cogs,'exp',0],
-      ['مجمل الربح',p.gross,'profit',0],
-      ['صافي الربح التشغيلي',p.net_profit,'profit',0],
-      ['— الأصول والخصوم —',null,'hdr',0],
-      ['الأصول',bs.assets,'asset',0],
-      ['المخزون (بالتكلفة)',bs.inventory_cost,'',1],['مديونيات العملاء',bs.receivables,'',1],
-      ['الخصوم (الموردون)',bs.payables,'liab',0],
-      ['صافي حقوق الملكية',bs.equity,'equity',0],
-    ];
-    b.innerHTML=`<div class="card" style="max-width:680px">
-      <div style="font-weight:700;margin-bottom:12px;font-size:15px">${icon('tree')} شجرة الحسابات · ${esc(j.from)} ← ${esc(j.to)}</div>
-      ${rows.map(r=>{
-        if(r[2]==='hdr')return `<div class="acc-sec" style="margin-top:14px">${r[0]}</div>`;
-        const col=r[2]==='profit'||r[2]==='rev'||r[2]==='asset'||r[2]==='equity'?'var(--ok)':r[2]==='exp'||r[2]==='liab'?'var(--danger)':'';
-        const bold=r[3]===0?'font-weight:700':'';
-        return `<div class="acc-line"><span style="${bold};padding-right:${r[3]*20}px;${r[3]>0?'color:var(--muted)':''}">${r[0]}</span><b class="num" style="${bold};${col&&r[3]===0?'color:'+col:''}">${moneyp(r[1])}</b></div>`;
-      }).join('')}
-      <p style="color:var(--muted);font-size:12px;margin:12px 0 0">شجرة حسابات إدارية مبنية على بيانات Genius الحقيقية (مبيعات/مشتريات/مخزون/عملاء/موردين).</p>
-    </div>`;
+    if(chartData===null){loadChart();b.innerHTML=`<div class="empty">${icon('tree',44)}<div>بحمّل شجرة الحسابات…</div></div>`;return;}
+    if(chartData.available&&chartData.tree&&chartData.tree.length){
+      b.innerHTML=`<div class="card" style="max-width:720px">
+        <div style="font-weight:700;margin-bottom:12px;font-size:15px">${icon('tree')} شجرة الحسابات (من Genius) · ${num(countNodes(chartData.tree))} حساب</div>
+        ${chartRows(chartData.tree,0,[]).join('')}
+        <p style="color:var(--muted);font-size:12px;margin:12px 0 0">الشجرة الحقيقية من Genius بأرصدتها. الأرقام على مستوى الآباء مجمّعة من الفروع.</p>
+      </div>`;
+    }else{
+      const rows=[
+        ['الإيرادات',p.net_sales,'rev',0],
+        ['إجمالي المبيعات',p.revenue,'',1],['الخصومات',-p.discount,'',1],['مرتجعات المبيعات',-p.sales_returns,'',1],
+        ['تكلفة البضاعة المباعة',-p.cogs,'exp',0],
+        ['مجمل الربح',p.gross,'profit',0],['صافي الربح التشغيلي',p.net_profit,'profit',0],
+        ['— الأصول والخصوم —',null,'hdr',0],
+        ['الأصول',bs.assets,'asset',0],
+        ['المخزون (بالتكلفة)',bs.inventory_cost,'',1],['مديونيات العملاء',bs.receivables,'',1],
+        ['الخصوم (الموردون)',bs.payables,'liab',0],['صافي حقوق الملكية',bs.equity,'equity',0],
+      ];
+      b.innerHTML=`<div class="card" style="max-width:680px">
+        <div style="font-weight:700;margin-bottom:12px;font-size:15px">${icon('tree')} شجرة الحسابات (ملخّص إداري)</div>
+        ${rows.map(r=>{
+          if(r[2]==='hdr')return `<div class="acc-sec" style="margin-top:14px">${r[0]}</div>`;
+          const col=r[2]==='profit'||r[2]==='rev'||r[2]==='asset'||r[2]==='equity'?'var(--ok)':r[2]==='exp'||r[2]==='liab'?'var(--danger)':'';
+          const bold=r[3]===0?'font-weight:700':'';
+          return `<div class="acc-line"><span style="${bold};padding-right:${r[3]*20}px;${r[3]>0?'color:var(--muted)':''}">${r[0]}</span><b class="num" style="${bold};${col&&r[3]===0?'color:'+col:''}">${moneyp(r[1])}</b></div>`;
+        }).join('')}
+        <p style="color:var(--muted);font-size:12px;margin:12px 0 0">شجرة الحسابات الحقيقية من Genius لسه ما اتزامنتش — ده ملخّص إداري من بيانات التشغيل. شغّل المزامنة بالنسخة الجديدة.</p>
+      </div>`;
+    }
   }
 }
 
