@@ -218,7 +218,7 @@ app.get('/api/sync', auth, async (req, res) => {
 });
 
 /* صلاحيات الشاشات + سجل التعديلات */
-const PERM_KEYS = ['dash', 'pos', 'invoices', 'delivery', 'items', 'purch', 'returns', 'fin', 'statements', 'cheques', 'cust', 'vend', 'cash', 'emp', 'usr', 'audit'];
+const PERM_KEYS = ['dash', 'pos', 'invoices', 'delivery', 'items', 'purch', 'returns', 'fin', 'report', 'statements', 'cheques', 'cust', 'vend', 'cash', 'emp', 'usr', 'audit'];
 function userPerms(u) {
   if (u.owner) return PERM_KEYS.slice();
   if (Array.isArray(u.perms)) return u.perms.filter(k => PERM_KEYS.includes(k));
@@ -622,14 +622,20 @@ app.get('/api/financials', auth, async (req, res) => {
     const to = re.test(req.query.to || '') ? req.query.to : new Date().toISOString().slice(0, 10);
     let from = req.query.from;
     if (!re.test(from || '')) { const d = new Date(to + 'T00:00:00Z'); d.setUTCDate(d.getUTCDate() - 29); from = d.toISOString().slice(0, 10); }
+    // يُحسب مباشرة من الفواتير المتزامنة (sales) — مفيش انتظار لمجموعة منفصلة
     const { rows } = await pool.query(
-      `SELECT data->>'date' AS date,
-         COALESCE(NULLIF(data->>'revenue','')::numeric,0) AS revenue,
-         COALESCE(NULLIF(data->>'cogs','')::numeric,0) AS cogs,
-         COALESCE(NULLIF(data->>'discount','')::numeric,0) AS discount,
-         COALESCE(NULLIF(data->>'invoices','')::numeric,0) AS invoices
-       FROM docs WHERE col='fin_daily' AND NOT deleted AND (data->>'date') BETWEEN $1 AND $2
-       ORDER BY data->>'date'`, [from, to]);
+      `SELECT d.data->>'date' AS date,
+         COALESCE(SUM(li.rev),0) AS revenue,
+         COALESCE(SUM(li.cogs),0) AS cogs,
+         SUM(COALESCE((d.data->>'discount')::numeric,0)) AS discount,
+         count(*) AS invoices
+       FROM docs d LEFT JOIN LATERAL (
+         SELECT SUM((l->>'price')::numeric*(l->>'qty')::numeric) AS rev,
+                SUM(COALESCE((l->>'cost')::numeric,0)*(l->>'qty')::numeric) AS cogs
+         FROM jsonb_array_elements(CASE WHEN jsonb_typeof(d.data->'lines')='array' THEN d.data->'lines' ELSE '[]'::jsonb END) l
+       ) li ON true
+       WHERE d.col='sales' AND NOT d.deleted AND (d.data->>'date') BETWEEN $1 AND $2
+       GROUP BY d.data->>'date' ORDER BY d.data->>'date'`, [from, to]);
     let revenue = 0, cogs = 0, discount = 0, invoices = 0;
     const series = rows.map(r => {
       revenue += +r.revenue; cogs += +r.cogs; discount += +r.discount; invoices += +r.invoices;
@@ -643,6 +649,86 @@ app.get('/api/financials', auth, async (req, res) => {
       invoices, avg_invoice: invoices ? rnd(net_sales / invoices) : 0, series,
     });
   } catch (e) { res.status(500).json({ error: 'financials', detail: e.message }); }
+});
+
+// محرّك التقارير المرن — مصدر (مبيعات/مشتريات) × تجميع (يوم/شهر/صنف/عميل/مورد)
+app.get('/api/report', auth, async (req, res) => {
+  try {
+    const re = /^\d{4}-\d{2}-\d{2}$/;
+    const to = re.test(req.query.to || '') ? req.query.to : new Date().toISOString().slice(0, 10);
+    let from = req.query.from;
+    if (!re.test(from || '')) { const d = new Date(to + 'T00:00:00Z'); d.setUTCDate(d.getUTCDate() - 29); from = d.toISOString().slice(0, 10); }
+    const source = req.query.source === 'purch' ? 'purch' : 'sales';
+    let group = String(req.query.group || 'day');
+    const okGroups = source === 'sales' ? ['day', 'month', 'item', 'customer'] : ['day', 'month', 'vendor', 'item'];
+    if (!okGroups.includes(group)) group = 'day';
+    const lim = Math.min(1000, Math.max(1, parseInt(req.query.limit, 10) || 200));
+    const LINES = "jsonb_array_elements(CASE WHEN jsonb_typeof(d.data->'lines')='array' THEN d.data->'lines' ELSE '[]'::jsonb END)";
+    let rows;
+    if (source === 'sales') {
+      const where = `d.col='sales' AND NOT d.deleted AND (d.data->>'date') BETWEEN $1 AND $2`;
+      if (group === 'item') {
+        ({ rows } = await pool.query(
+          `SELECT l->>'name' AS label,
+             SUM((l->>'qty')::numeric) AS qty,
+             SUM((l->>'price')::numeric*(l->>'qty')::numeric) AS amount,
+             SUM(((l->>'price')::numeric-COALESCE((l->>'cost')::numeric,0))*(l->>'qty')::numeric) AS profit,
+             COUNT(DISTINCT d.id) AS cnt
+           FROM docs d, ${LINES} l
+           WHERE ${where} GROUP BY label ORDER BY amount DESC NULLS LAST LIMIT $3`, [from, to, lim]));
+      } else if (group === 'customer') {
+        ({ rows } = await pool.query(
+          `SELECT COALESCE(NULLIF(d.data->>'customer',''),'— بدون عميل') AS label,
+             SUM(COALESCE((d.data->>'total')::numeric,0)) AS amount,
+             COALESCE(SUM(li.profit),0) - SUM(COALESCE((d.data->>'discount')::numeric,0)) AS profit,
+             NULL AS qty, COUNT(*) AS cnt
+           FROM docs d LEFT JOIN LATERAL (
+             SELECT SUM(((l->>'price')::numeric-COALESCE((l->>'cost')::numeric,0))*(l->>'qty')::numeric) AS profit
+             FROM ${LINES} l) li ON true
+           WHERE ${where} GROUP BY label ORDER BY amount DESC NULLS LAST LIMIT $3`, [from, to, lim]));
+      } else {
+        const key = group === 'month' ? "substring(d.data->>'date',1,7)" : "d.data->>'date'";
+        ({ rows } = await pool.query(
+          `SELECT ${key} AS label,
+             SUM(COALESCE((d.data->>'total')::numeric,0)) AS amount,
+             COALESCE(SUM(li.profit),0) - SUM(COALESCE((d.data->>'discount')::numeric,0)) AS profit,
+             NULL AS qty, COUNT(*) AS cnt
+           FROM docs d LEFT JOIN LATERAL (
+             SELECT SUM(((l->>'price')::numeric-COALESCE((l->>'cost')::numeric,0))*(l->>'qty')::numeric) AS profit
+             FROM ${LINES} l) li ON true
+           WHERE ${where} GROUP BY label ORDER BY label`, [from, to]));
+      }
+    } else {
+      const where = `d.col='gpur' AND NOT d.deleted AND (d.data->>'date') BETWEEN $1 AND $2`;
+      if (group === 'item') {
+        ({ rows } = await pool.query(
+          `SELECT l->>'name' AS label,
+             SUM((l->>'qty')::numeric) AS qty,
+             SUM((l->>'qty')::numeric*COALESCE((l->>'cost')::numeric,0)) AS amount,
+             NULL AS profit, COUNT(DISTINCT d.id) AS cnt
+           FROM docs d, ${LINES} l
+           WHERE ${where} GROUP BY label ORDER BY amount DESC NULLS LAST LIMIT $3`, [from, to, lim]));
+      } else if (group === 'vendor') {
+        ({ rows } = await pool.query(
+          `SELECT COALESCE(NULLIF(d.data->>'vendor',''),'— بدون مورد') AS label,
+             SUM(COALESCE((d.data->>'total')::numeric,0)) AS amount,
+             NULL AS profit, NULL AS qty, COUNT(*) AS cnt
+           FROM docs d WHERE ${where} GROUP BY label ORDER BY amount DESC NULLS LAST LIMIT $3`, [from, to, lim]));
+      } else {
+        const key = group === 'month' ? "substring(d.data->>'date',1,7)" : "d.data->>'date'";
+        ({ rows } = await pool.query(
+          `SELECT ${key} AS label,
+             SUM(COALESCE((d.data->>'total')::numeric,0)) AS amount,
+             NULL AS profit, NULL AS qty, COUNT(*) AS cnt
+           FROM docs d WHERE ${where} GROUP BY label ORDER BY label`, [from, to]));
+      }
+    }
+    const rnd = x => Math.round((+x || 0) * 100) / 100;
+    const out = rows.map(r => ({ label: r.label || '—', amount: rnd(r.amount), profit: r.profit == null ? null : rnd(r.profit), qty: r.qty == null ? null : rnd(r.qty), count: Number(r.cnt) || 0 }));
+    const totals = out.reduce((a, r) => ({ amount: a.amount + r.amount, profit: a.profit + (r.profit || 0), qty: a.qty + (r.qty || 0), count: a.count + r.count }), { amount: 0, profit: 0, qty: 0, count: 0 });
+    totals.amount = rnd(totals.amount); totals.profit = rnd(totals.profit); totals.qty = rnd(totals.qty);
+    res.json({ from, to, source, group, hasProfit: source === 'sales', hasQty: group === 'item', totals, rows: out });
+  } catch (e) { res.status(500).json({ error: 'report', detail: e.message }); }
 });
 
 // الحضور والانصراف (من Genius) — خادمي
