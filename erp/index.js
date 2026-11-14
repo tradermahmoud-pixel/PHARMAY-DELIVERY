@@ -218,7 +218,7 @@ app.get('/api/sync', auth, async (req, res) => {
 });
 
 /* صلاحيات الشاشات + سجل التعديلات */
-const PERM_KEYS = ['dash', 'pos', 'invoices', 'delivery', 'items', 'purch', 'returns', 'fin', 'report', 'statements', 'cheques', 'cust', 'vend', 'cash', 'emp', 'usr', 'audit'];
+const PERM_KEYS = ['dash', 'pos', 'invoices', 'delivery', 'items', 'stockcard', 'purch', 'returns', 'fin', 'report', 'accounts', 'statements', 'cheques', 'cust', 'vend', 'cash', 'emp', 'usr', 'audit'];
 function userPerms(u) {
   if (u.owner) return PERM_KEYS.slice();
   if (Array.isArray(u.perms)) return u.perms.filter(k => PERM_KEYS.includes(k));
@@ -729,6 +729,79 @@ app.get('/api/report', auth, async (req, res) => {
     totals.amount = rnd(totals.amount); totals.profit = rnd(totals.profit); totals.qty = rnd(totals.qty);
     res.json({ from, to, source, group, hasProfit: source === 'sales', hasQty: group === 'item', totals, rows: out });
   } catch (e) { res.status(500).json({ error: 'report', detail: e.message }); }
+});
+
+// كارت الصنف — حركة صنف واحد (وارد من الشرا + منصرف من البيع)
+app.get('/api/stock-card', auth, async (req, res) => {
+  try {
+    const name = String(req.query.name || '').trim();
+    if (!name) return res.json({ movements: [], summary: {} });
+    const days = Math.min(1095, Math.max(1, parseInt(req.query.days, 10) || 180));
+    const LINES = c => `jsonb_array_elements(CASE WHEN jsonb_typeof(${c}.data->'lines')='array' THEN ${c}.data->'lines' ELSE '[]'::jsonb END)`;
+    const fromDate = `to_char(now() - ($2::int * interval '1 day'),'YYYY-MM-DD')`;
+    const { rows } = await pool.query(
+      `SELECT * FROM (
+         SELECT COALESCE((d.data->>'ts')::bigint,0) AS ts, d.data->>'date' AS date, d.data->>'no' AS no,
+                COALESCE(d.data->>'customer','') AS party, 'out' AS typ,
+                (l->>'qty')::numeric AS qty, COALESCE((l->>'price')::numeric,0) AS unit
+         FROM docs d, ${LINES('d')} l
+         WHERE d.col='sales' AND NOT d.deleted AND l->>'name'=$1 AND (d.data->>'date') >= ${fromDate}
+         UNION ALL
+         SELECT COALESCE((d.data->>'ts')::bigint,0) AS ts, d.data->>'date' AS date, d.data->>'no' AS no,
+                COALESCE(d.data->>'vendor','') AS party, 'in' AS typ,
+                (l->>'qty')::numeric AS qty, COALESCE((l->>'cost')::numeric,0) AS unit
+         FROM docs d, ${LINES('d')} l
+         WHERE d.col='gpur' AND NOT d.deleted AND l->>'name'=$1 AND (d.data->>'date') >= ${fromDate}
+       ) m ORDER BY ts DESC LIMIT 1000`, [name, days]);
+    const it = await pool.query(`SELECT data->>'stock' stock, data->>'sell' sell FROM docs WHERE col='items' AND NOT deleted AND data->>'name'=$1 LIMIT 1`, [name]);
+    let inQ = 0, outQ = 0, inV = 0, outV = 0;
+    rows.forEach(r => { const q = +r.qty || 0, v = q * (+r.unit || 0); if (r.typ === 'in') { inQ += q; inV += v; } else { outQ += q; outV += v; } });
+    const rnd = x => Math.round(x * 100) / 100;
+    res.json({
+      name, movements: rows.map(r => ({ ts: Number(r.ts), date: r.date, no: r.no, party: r.party, typ: r.typ, qty: +r.qty || 0, unit: +r.unit || 0, value: rnd((+r.qty || 0) * (+r.unit || 0)) })),
+      summary: { in_qty: rnd(inQ), out_qty: rnd(outQ), in_value: rnd(inV), out_value: rnd(outV), stock: it.rows[0] ? (+it.rows[0].stock || 0) : null, sell: it.rows[0] ? (+it.rows[0].sell || 0) : null },
+    });
+  } catch (e) { res.status(500).json({ error: 'stock-card', detail: e.message }); }
+});
+
+// الحسابات الختامية — قائمة الدخل + المركز المالي + شجرة الحسابات (كلها من بيانات Genius)
+app.get('/api/accounts', auth, async (req, res) => {
+  try {
+    const re = /^\d{4}-\d{2}-\d{2}$/;
+    const to = re.test(req.query.to || '') ? req.query.to : new Date().toISOString().slice(0, 10);
+    let from = req.query.from;
+    if (!re.test(from || '')) { const d = new Date(to + 'T00:00:00Z'); d.setUTCDate(d.getUTCDate() - 29); from = d.toISOString().slice(0, 10); }
+    const LINES = "jsonb_array_elements(CASE WHEN jsonb_typeof(d.data->'lines')='array' THEN d.data->'lines' ELSE '[]'::jsonb END)";
+    const sales = await pool.query(
+      `SELECT COALESCE(SUM(li.rev),0) revenue, COALESCE(SUM(li.cogs),0) cogs,
+              SUM(COALESCE((d.data->>'discount')::numeric,0)) discount, count(*) invoices
+       FROM docs d LEFT JOIN LATERAL (
+         SELECT SUM((l->>'price')::numeric*(l->>'qty')::numeric) rev,
+                SUM(COALESCE((l->>'cost')::numeric,0)*(l->>'qty')::numeric) cogs
+         FROM ${LINES} l) li ON true
+       WHERE d.col='sales' AND NOT d.deleted AND (d.data->>'date') BETWEEN $1 AND $2`, [from, to]);
+    const sret = await pool.query(`SELECT COALESCE(SUM(COALESCE((data->>'ret_value')::numeric,0)),0) v FROM docs WHERE col='sret' AND NOT deleted AND (data->>'date') BETWEEN $1 AND $2`, [from, to]);
+    const pret = await pool.query(`SELECT COALESCE(SUM(COALESCE((data->>'total')::numeric,0)),0) v FROM docs WHERE col='pret' AND NOT deleted AND (data->>'date') BETWEEN $1 AND $2`, [from, to]);
+    const inv = await pool.query(
+      `SELECT COALESCE(SUM((i.data->>'stock')::numeric * COALESCE(NULLIF(s.data->>'avg_cost','')::numeric,0)),0) cost,
+              COALESCE(SUM((i.data->>'stock')::numeric * COALESCE(NULLIF(i.data->>'sell','')::numeric,0)),0) sell
+       FROM docs i LEFT JOIN docs s ON s.col='istats' AND s.id=i.id
+       WHERE i.col='items' AND NOT i.deleted`);
+    const recv = await pool.query(`SELECT COALESCE(SUM(GREATEST(COALESCE(NULLIF(data->>'balance','')::numeric,0),0)),0) v FROM docs WHERE col='customers' AND NOT deleted`);
+    const pay = await pool.query(`SELECT COALESCE(SUM(GREATEST(COALESCE(NULLIF(data->>'balance','')::numeric,0),0)),0) v FROM docs WHERE col='vendors' AND NOT deleted`);
+    const rnd = x => Math.round((+x || 0) * 100) / 100;
+    const revenue = +sales.rows[0].revenue, cogs = +sales.rows[0].cogs, discount = +sales.rows[0].discount, invoices = Number(sales.rows[0].invoices) || 0;
+    const net_sales = revenue - discount, gross = net_sales - cogs;
+    const sales_returns = +sret.rows[0].v, net_profit = gross - sales_returns;
+    const inventory_cost = +inv.rows[0].cost, inventory_sell = +inv.rows[0].sell;
+    const receivables = +recv.rows[0].v, payables = +pay.rows[0].v;
+    const assets = inventory_cost + receivables, equity = assets - payables;
+    res.json({
+      from, to,
+      pl: { revenue: rnd(revenue), discount: rnd(discount), net_sales: rnd(net_sales), cogs: rnd(cogs), gross: rnd(gross), margin: net_sales ? Math.round(gross / net_sales * 1000) / 10 : 0, sales_returns: rnd(sales_returns), purch_returns: rnd(+pret.rows[0].v), net_profit: rnd(net_profit), invoices },
+      bs: { inventory_cost: rnd(inventory_cost), inventory_sell: rnd(inventory_sell), receivables: rnd(receivables), payables: rnd(payables), assets: rnd(assets), equity: rnd(equity) },
+    });
+  } catch (e) { res.status(500).json({ error: 'accounts', detail: e.message }); }
 });
 
 // الحضور والانصراف (من Genius) — خادمي
