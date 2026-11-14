@@ -206,7 +206,7 @@ app.get('/api/sync', auth, async (req, res) => {
   const since = parseInt(req.query.since, 10) || 0;
   // الفواتير والأصناف مش بتتزامن للعميل (كتير جدًا) — بتتقرى من endpoints مخصصة عشان الأداء
   const { rows } = await pool.query(
-    "SELECT col,id,data,deleted,seq FROM docs WHERE seq>$1 AND col NOT IN ('sales','items','customers','istats','attendance','gpur','fin_daily','sret','pret','vled','cled','cheques','gcash','gdrawers','gacct') ORDER BY seq LIMIT 20000", [since]);
+    "SELECT col,id,data,deleted,seq FROM docs WHERE seq>$1 AND col NOT IN ('sales','items','customers','istats','attendance','gpur','fin_daily','sret','pret','vled','cled','cheques','gcash','gdrawers','gacct','gshifts') ORDER BY seq LIMIT 20000", [since]);
   let seq = since;
   const docs = rows.map(r => { if (r.seq > seq) seq = Number(r.seq); return r.deleted ? { c: r.col, i: r.id, x: true } : { c: r.col, i: r.id, d: r.data }; });
   // تقديم المؤشر لتخطّي مستندات الفواتير المستبعَدة (طالما مفيش صفحة ممتلئة)
@@ -218,7 +218,7 @@ app.get('/api/sync', auth, async (req, res) => {
 });
 
 /* صلاحيات الشاشات + سجل التعديلات */
-const PERM_KEYS = ['dash', 'pos', 'invoices', 'delivery', 'items', 'stockcard', 'purch', 'returns', 'fin', 'report', 'accounts', 'statements', 'cheques', 'cust', 'vend', 'cash', 'emp', 'usr', 'audit'];
+const PERM_KEYS = ['dash', 'pos', 'invoices', 'delivery', 'items', 'stockcard', 'purch', 'returns', 'fin', 'report', 'accounts', 'statements', 'cheques', 'cust', 'vend', 'cash', 'shifts', 'emp', 'usr', 'audit'];
 function userPerms(u) {
   if (u.owner) return PERM_KEYS.slice();
   if (Array.isArray(u.perms)) return u.perms.filter(k => PERM_KEYS.includes(k));
@@ -762,6 +762,27 @@ app.get('/api/chart-of-accounts', auth, async (_req, res) => {
     roots.forEach(rollup);
     res.json({ available: true, tree: roots });
   } catch (e) { res.status(500).json({ error: 'chart', detail: e.message }); }
+});
+
+// المناوبات (تقفيل الورديات) من Genius
+app.get('/api/shifts', auth, async (req, res) => {
+  try {
+    const days = Math.min(365, Math.max(1, parseInt(req.query.days, 10) || 30));
+    const lim = Math.min(500, Math.max(1, parseInt(req.query.limit, 10) || 300));
+    const params = [days];
+    let where = `col='gshifts' AND NOT deleted AND left(data->>'date',10) >= to_char(now() - ($1::int * interval '1 day'),'YYYY-MM-DD')`;
+    const q = String(req.query.q || '').trim();
+    if (q) { params.push('%' + q + '%'); where += ` AND (COALESCE(data->>'cashier','') ILIKE $${params.length} OR data->>'no' ILIKE $${params.length})`; }
+    const tot = await pool.query(
+      `SELECT count(*)::int n,
+        COALESCE(SUM(COALESCE((data->>'sales')::numeric,0)),0) sales,
+        COALESCE(SUM(COALESCE((data->>'visa')::numeric,0)),0) visa,
+        COALESCE(SUM(COALESCE((data->>'diff')::numeric,0)),0) diff
+       FROM docs WHERE ${where}`, params);
+    params.push(lim);
+    const { rows } = await pool.query(`SELECT data FROM docs WHERE ${where} ORDER BY COALESCE((data->>'ts')::bigint,0) DESC LIMIT $${params.length}`, params);
+    res.json({ count: tot.rows[0].n, sales: Number(tot.rows[0].sales), visa: Number(tot.rows[0].visa), diff: Number(tot.rows[0].diff), rows: rows.map(r => r.data) });
+  } catch (e) { res.status(500).json({ error: 'shifts', detail: e.message }); }
 });
 
 // كارت الصنف — حركة صنف واحد (وارد من الشرا + منصرف من البيع)
