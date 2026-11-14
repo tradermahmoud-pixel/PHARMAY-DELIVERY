@@ -1174,17 +1174,23 @@ function partyPay(col,id){
 function partyDel(col,id){const x=partyGet(col,id);confirmDel(`حذف «${esc(x.name)}»؟`,()=>{const p=del(col,id);if(col==='customers'&&p&&p.then)p.then(custRefresh);toast('تم الحذف','ok')})}
 
 /* ---------- Cash (الخزنة) ---------- */
-let cashF='all';
+let cashF='all', cashSrc='genius', cashGen=null, cashGenReq=0;
 function vCash(v){
+  const tog=`<div class="sbar"><div class="seg" style="max-width:320px">
+    <button class="${cashSrc==='genius'?'on':''}" onclick="cashSrc='genius';render()">${icon('cash')} الخزنة الفعلية (Genius)</button>
+    <button class="${cashSrc==='manual'?'on':''}" onclick="cashSrc='manual';render()">${icon('edit')} يدوي</button>
+  </div></div>`;
+  if(cashSrc==='genius'){ vCashGenius(v,tog); return; }
   let list=arr('cash').sort((a,b)=>b.ts-a.ts);
   if(cashF!=='all')list=list.filter(m=>m.type===cashF);
   const bal=cashBalance();
   const t0=dayStart(0);const today=arr('cash').filter(m=>m.ts>=t0);
   const inT=today.filter(m=>m.type!=='out').reduce((s,m)=>s+(+m.amount||0),0);
   const outT=today.filter(m=>m.type==='out').reduce((s,m)=>s+(+m.amount||0),0);
-  v.innerHTML=`
+  v.innerHTML=tog+`
+  <p style="color:var(--muted);font-size:12.5px;margin:0 0 10px">تسجيل نقدية يدوي داخل البرنامج (مصاريف/إيداعات). للرصيد الفعلي من Genius اختر «الخزنة الفعلية».</p>
   <div class="kpis" style="grid-template-columns:repeat(auto-fill,minmax(180px,1fr))">
-    <div class="kpi accent"><div class="t">${icon('cash')} رصيد الخزنة</div><div class="v">${money(bal)}</div></div>
+    <div class="kpi accent"><div class="t">${icon('cash')} رصيد الخزنة (يدوي)</div><div class="v">${money(bal)}</div></div>
     <div class="kpi"><div class="t">وارد اليوم</div><div class="v" style="color:var(--ok)">${money(inT)}</div></div>
     <div class="kpi"><div class="t">منصرف اليوم</div><div class="v" style="color:var(--danger)">${money(outT)}</div></div>
   </div>
@@ -1202,6 +1208,33 @@ function vCash(v){
       <td class="num" style="color:var(--danger);font-weight:600">${m.type==='out'?moneyp(m.amount):''}</td>
       <td><div class="act"><button class="ib dng" onclick="cashDel('${m.id}')">${icon('trash')}</button></div></td>
     </tr>`).join(''):`<tr><td colspan=5><div class="empty">${icon('cash',44)}<div>لا حركات</div></div></td></tr>`}</tbody>
+  </table></div></div>`;
+}
+function vCashGenius(v,tog){
+  v.innerHTML=tog+'<div id="cgBody"></div>';
+  renderCashGenius();
+  const my=++cashGenReq;
+  fetch((window.__BASE__||'')+'/api/cash-genius?days=60',{credentials:'same-origin'}).then(r=>r.ok?r.json():null).then(j=>{if(my!==cashGenReq)return;cashGen=j;if(route==='cash'&&cashSrc==='genius')renderCashGenius();}).catch(()=>{});
+}
+function renderCashGenius(){
+  const b=$('#cgBody');if(!b)return;const j=cashGen;
+  if(j===null){b.innerHTML=`<div class="empty">${icon('cash',44)}<div>بحمّل…</div></div>`;return;}
+  if(!j.available){b.innerHTML=`<div class="empty">${icon('cash',44)}<div>لسه مفيش بيانات خزنة من Genius.<br>شغّل المزامنة بالنسخة الجديدة. لو فضلت فاضية، جدول الخزنة أعمدته مختلفة — شغّل <b>--schema-all</b> وابعتهولي.</div></div>`;return;}
+  const mv=j.movements||[];
+  b.innerHTML=`<div class="kpis" style="grid-template-columns:repeat(auto-fill,minmax(180px,1fr))">
+    <div class="kpi accent"><div class="t">${icon('cash')} رصيد الخزنة الفعلي</div><div class="v">${money(j.balance)}</div></div>
+    <div class="kpi"><div class="t">وارد اليوم</div><div class="v" style="color:var(--ok)">${money(j.in_today)}</div></div>
+    <div class="kpi"><div class="t">منصرف اليوم</div><div class="v" style="color:var(--danger)">${money(j.out_today)}</div></div>
+  </div>
+  <div class="card"><div class="tbl-wrap"><table class="tbl">
+    <thead><tr><th>التاريخ</th><th>البيان</th><th>وارد</th><th>منصرف</th><th>الرصيد</th></tr></thead>
+    <tbody>${mv.length?mv.map(m=>{const d=+m.delta||0;return `<tr>
+      <td class="num" dir="ltr" style="text-align:right;white-space:nowrap">${esc(m.date||'')}</td>
+      <td style="color:var(--muted);font-size:12.5px">${esc(m.op||'—')}</td>
+      <td class="num" style="color:var(--ok);font-weight:600">${d>0?moneyp(d):''}</td>
+      <td class="num" style="color:var(--danger);font-weight:600">${d<0?moneyp(-d):''}</td>
+      <td class="num"><b>${moneyp(m.new)}</b></td>
+    </tr>`}).join(''):`<tr><td colspan=5><div class="empty">لا حركات في الفترة</div></td></tr>`}</tbody>
   </table></div></div>`;
 }
 function cashMove(type){

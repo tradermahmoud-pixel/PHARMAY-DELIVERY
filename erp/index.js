@@ -206,7 +206,7 @@ app.get('/api/sync', auth, async (req, res) => {
   const since = parseInt(req.query.since, 10) || 0;
   // الفواتير والأصناف مش بتتزامن للعميل (كتير جدًا) — بتتقرى من endpoints مخصصة عشان الأداء
   const { rows } = await pool.query(
-    "SELECT col,id,data,deleted,seq FROM docs WHERE seq>$1 AND col NOT IN ('sales','items','customers','istats','attendance','gpur','fin_daily','sret','pret','vled','cled','cheques') ORDER BY seq LIMIT 20000", [since]);
+    "SELECT col,id,data,deleted,seq FROM docs WHERE seq>$1 AND col NOT IN ('sales','items','customers','istats','attendance','gpur','fin_daily','sret','pret','vled','cled','cheques','gcash') ORDER BY seq LIMIT 20000", [since]);
   let seq = since;
   const docs = rows.map(r => { if (r.seq > seq) seq = Number(r.seq); return r.deleted ? { c: r.col, i: r.id, x: true } : { c: r.col, i: r.id, d: r.data }; });
   // تقديم المؤشر لتخطّي مستندات الفواتير المستبعَدة (طالما مفيش صفحة ممتلئة)
@@ -729,6 +729,30 @@ app.get('/api/report', auth, async (req, res) => {
     totals.amount = rnd(totals.amount); totals.profit = rnd(totals.profit); totals.qty = rnd(totals.qty);
     res.json({ from, to, source, group, hasProfit: source === 'sales', hasQty: group === 'item', totals, rows: out });
   } catch (e) { res.status(500).json({ error: 'report', detail: e.message }); }
+});
+
+// رصيد الخزنة الفعلي من Genius (سجل تغيّر رصيد الدرج)
+app.get('/api/cash-genius', auth, async (req, res) => {
+  try {
+    const days = Math.min(400, Math.max(1, parseInt(req.query.days, 10) || 60));
+    const has = await pool.query(`SELECT 1 FROM docs WHERE col='gcash' AND NOT deleted LIMIT 1`);
+    if (!has.rows.length) return res.json({ available: false, balance: 0, in_today: 0, out_today: 0, movements: [] });
+    const bal = await pool.query(
+      `SELECT COALESCE(SUM(b.bal),0) t FROM (
+         SELECT DISTINCT ON (data->>'drawer') COALESCE((data->>'new')::numeric,0) bal
+         FROM docs WHERE col='gcash' AND NOT deleted
+         ORDER BY data->>'drawer', COALESCE((data->>'ts')::bigint,0) DESC) b`);
+    const tday = await pool.query(
+      `SELECT COALESCE(SUM(GREATEST(COALESCE((data->>'delta')::numeric,0),0)),0) inv,
+              COALESCE(SUM(GREATEST(-COALESCE((data->>'delta')::numeric,0),0)),0) outv
+       FROM docs WHERE col='gcash' AND NOT deleted
+         AND left(data->>'date',10) = to_char((now() AT TIME ZONE 'Africa/Cairo')::date,'YYYY-MM-DD')`);
+    const { rows } = await pool.query(
+      `SELECT data FROM docs WHERE col='gcash' AND NOT deleted
+         AND (data->>'date') >= to_char(now() - ($1::int * interval '1 day'),'YYYY-MM-DD')
+       ORDER BY COALESCE((data->>'ts')::bigint,0) DESC LIMIT 500`, [days]);
+    res.json({ available: true, balance: Number(bal.rows[0].t) || 0, in_today: Number(tday.rows[0].inv) || 0, out_today: Number(tday.rows[0].outv) || 0, movements: rows.map(r => r.data) });
+  } catch (e) { res.status(500).json({ error: 'cash-genius', detail: e.message }); }
 });
 
 // كارت الصنف — حركة صنف واحد (وارد من الشرا + منصرف من البيع)
