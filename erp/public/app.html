@@ -221,6 +221,7 @@ function toast(msg,kind){const t=ce('div');t.className='toast '+(kind||'');t.tex
 /* icons */
 const IC={
   dash:'<path d="M4 13h7V4H4zM13 20h7V9h-7zM13 4v3h7V4zM4 20h7v-5H4z"/>',
+  chart:'<path d="M4 20V4M4 20h16M8 20v-6M12 20V9M16 20v-9M20 20v-4"/>',
   pos:'<rect x="3" y="4" width="18" height="12" rx="2"/><path d="M7 20h10M9 16v4M15 16v4M7 9h4"/>',
   box:'<path d="M3 7l9-4 9 4v10l-9 4-9-4z"/><path d="M3 7l9 4 9-4M12 11v10"/>',
   cart:'<circle cx="9" cy="20" r="1.5"/><circle cx="18" cy="20" r="1.5"/><path d="M2 3h3l2.4 12.4a1 1 0 0 0 1 .8h8.8a1 1 0 0 0 1-.8L21 7H6"/>',
@@ -269,7 +270,8 @@ const ROUTES=[
   {k:'delivery', t:'التوصيل', i:'truck'},
   {k:'items', t:'الأصناف والمخزون', i:'box', sec:'المخزن'},
   {k:'purch', t:'المشتريات',  i:'cart'},
-  {k:'cust',  t:'العملاء',    i:'users', sec:'الحسابات'},
+  {k:'fin',   t:'المحاسبة والأرباح', i:'chart', sec:'الحسابات'},
+  {k:'cust',  t:'العملاء',    i:'users'},
   {k:'vend',  t:'الموردين',   i:'truck'},
   {k:'cash',  t:'الخزنة',     i:'cash'},
   {k:'emp',   t:'الموظفين',   i:'id', sec:'الإدارة'},
@@ -331,7 +333,7 @@ function render(){
   const r=ROUTES.find(x=>x.k===route)||ROUTES[0];
   $('#title').textContent=r.t;
   const v=$('#view');
-  ({dash:vDash,pos:vPOS,invoices:vInvoices,delivery:vDelivery,items:vItems,purch:vPurch,cust:vCust,vend:vVend,cash:vCash,emp:vEmp,usr:vUsr}[route]||vDash)(v);
+  ({dash:vDash,pos:vPOS,invoices:vInvoices,delivery:vDelivery,items:vItems,purch:vPurch,fin:vFin,cust:vCust,vend:vVend,cash:vCash,emp:vEmp,usr:vUsr}[route]||vDash)(v);
 }
 
 /* ---------- Dashboard ---------- */
@@ -735,6 +737,64 @@ function renderDeliv(v){
 
 /* ---------- Purchases ---------- */
 let pcart=[];
+/* ===== المحاسبة والأرباح — قائمة دخل من بيانات Genius ===== */
+let finFrom='', finTo='', finData=null, finReq=0;
+function vFin(v){
+  if(!finFrom||!finTo){const d=defRange?defRange():(()=>{const t=new Date();const to=t.toISOString().slice(0,10);const f=new Date(t);f.setDate(f.getDate()-29);return[f.toISOString().slice(0,10),to]})();finFrom=d[0];finTo=d[1];}
+  v.innerHTML=`<div id="finBody"></div>`;
+  renderFin();if(finData===null)loadFin();
+}
+function loadFin(){
+  const my=++finReq;
+  fetch((window.__BASE__||'')+'/api/financials?from='+finFrom+'&to='+finTo,{credentials:'same-origin'})
+    .then(r=>r.ok?r.json():null).then(j=>{if(my!==finReq)return;finData=j||{};if(route==='fin')renderFin();})
+    .catch(()=>{if(my===finReq){finData={};renderFin();}});
+}
+function finPreset(n){const t=new Date();finTo=t.toISOString().slice(0,10);const f=new Date(t);f.setDate(f.getDate()-(n-1));finFrom=f.toISOString().slice(0,10);loadFin();}
+function finMonth(){const t=new Date();finFrom=t.toISOString().slice(0,8)+'01';finTo=t.toISOString().slice(0,10);loadFin();}
+function renderFin(){
+  const b=$('#finBody');if(!b)return;
+  const head=`<div class="sbar" style="flex-wrap:wrap;gap:8px;align-items:flex-end">
+    <label class="fld" style="margin:0"><span>من</span><input type="date" value="${esc(finFrom)}" onchange="finFrom=this.value;loadFin()" style="width:auto"></label>
+    <label class="fld" style="margin:0"><span>إلى</span><input type="date" value="${esc(finTo)}" onchange="finTo=this.value;loadFin()" style="width:auto"></label>
+    <div class="seg"><button onclick="finPreset(7)">٧ أيام</button><button onclick="finMonth()">الشهر</button><button onclick="finPreset(30)">٣٠ يوم</button><button onclick="finPreset(90)">٣ شهور</button><button onclick="finPreset(365)">سنة</button></div>
+    <div class="sp" style="flex:1"></div><button class="btn sm" onclick="copyFin()">${icon('chk')} نسخ</button>
+  </div>`;
+  const d=finData;
+  if(d===null){b.innerHTML=head+`<div class="empty">${icon('chart',44)}<div>بحمّل…</div></div>`;return;}
+  if(!d||d.invoices===undefined){b.innerHTML=head+`<div class="empty">${icon('chart',44)}<div>لا بيانات مالية في الفترة · بتظهر بعد مزامنة Genius</div></div>`;return;}
+  const neg=x=>x<0?'style="color:var(--danger)"':'';
+  const row=(label,val,bold,ind)=>`<tr${bold?' style="font-weight:700;background:color-mix(in srgb,var(--brand) 5%,transparent)"':''}><td style="${ind?'padding-right:24px;':''}">${label}</td><td class="num" ${neg(val)}>${money(val)}</td></tr>`;
+  // mini daily profit bars
+  const series=d.series||[];const mx=Math.max(1,...series.map(s=>Math.abs(s.gross||0)));
+  const bars=series.slice(-60).map(s=>{const h=Math.max(2,Math.abs(s.gross||0)/mx*70);const neg=(s.gross||0)<0;return `<div title="${esc(s.date)}: ${money(s.gross)}" style="flex:1;min-width:2px;height:${h}px;align-self:flex-end;border-radius:3px 3px 0 0;background:${neg?'var(--danger)':'linear-gradient(180deg,var(--brand2,#34d399),var(--brand))'}"></div>`}).join('');
+  b.innerHTML=head+`
+  <div class="kpis" style="grid-template-columns:repeat(auto-fill,minmax(160px,1fr));margin-bottom:14px">
+    <div class="kpi accent"><div class="t">${icon('cash')} صافي المبيعات</div><div class="v">${money(d.net_sales)}</div></div>
+    <div class="kpi"><div class="t">مجمل الربح</div><div class="v" style="color:var(--ok)">${money(d.gross)}</div><div class="s">هامش ${num(d.margin)}%</div></div>
+    <div class="kpi"><div class="t">تكلفة البضاعة</div><div class="v">${money(d.cogs)}</div></div>
+    <div class="kpi"><div class="t">عدد الفواتير</div><div class="v">${num(d.invoices)}</div><div class="s">متوسط ${money(d.avg_invoice)}</div></div>
+  </div>
+  ${series.length?`<div class="card" style="margin-bottom:14px"><div style="font-size:13px;color:var(--muted);margin-bottom:8px">مجمل الربح اليومي (آخر ${Math.min(60,series.length)} يوم)</div><div style="display:flex;align-items:flex-end;gap:2px;height:76px">${bars}</div></div>`:''}
+  <div class="card"><div style="font-weight:700;margin-bottom:10px">${icon('bill')} قائمة الدخل · ${esc(finFrom)} ← ${esc(finTo)}</div>
+  <div class="tbl-wrap"><table class="tbl" style="max-width:640px">
+    <tbody>
+      ${row('إجمالي المبيعات', d.revenue)}
+      ${row('(−) الخصومات', -d.discount,0,1)}
+      ${row('صافي المبيعات', d.net_sales, 1)}
+      ${row('(−) تكلفة البضاعة المباعة', -d.cogs,0,1)}
+      ${row('مجمل الربح', d.gross, 1)}
+      <tr><td>هامش مجمل الربح</td><td class="num">${num(d.margin)}%</td></tr>
+    </tbody>
+  </table></div>
+  <p style="color:var(--muted);font-size:12px;margin-top:10px">محسوبة من فواتير Genius (سعر البيع − التكلفة لكل صنف). المرتجعات والمصروفات هتتضاف في التحديثات الجاية.</p></div>`;
+}
+function copyFin(){
+  const d=finData;if(!d||d.invoices===undefined)return toast('مفيش بيانات','err');
+  const t=`قائمة الدخل (${finFrom} ← ${finTo})\nصافي المبيعات: ${num(d.net_sales)}\nتكلفة البضاعة: ${num(d.cogs)}\nمجمل الربح: ${num(d.gross)} (هامش ${num(d.margin)}%)\nعدد الفواتير: ${num(d.invoices)} · متوسط ${num(d.avg_invoice)}`;
+  (navigator.clipboard?navigator.clipboard.writeText(t):Promise.reject()).then(()=>toast('اتنسخ ✓','ok')).catch(()=>prompt('انسخ:',t));
+}
+
 let purchTab='suggest', purchCover=14, purchQ='', purchAll=false, purchData=null, purchReq=0;
 function vPurch(v){
   v.innerHTML=`

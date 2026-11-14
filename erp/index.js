@@ -200,7 +200,7 @@ app.get('/api/sync', auth, async (req, res) => {
   const since = parseInt(req.query.since, 10) || 0;
   // الفواتير والأصناف مش بتتزامن للعميل (كتير جدًا) — بتتقرى من endpoints مخصصة عشان الأداء
   const { rows } = await pool.query(
-    "SELECT col,id,data,deleted,seq FROM docs WHERE seq>$1 AND col NOT IN ('sales','items','customers','istats','attendance','gpur') ORDER BY seq LIMIT 20000", [since]);
+    "SELECT col,id,data,deleted,seq FROM docs WHERE seq>$1 AND col NOT IN ('sales','items','customers','istats','attendance','gpur','fin_daily') ORDER BY seq LIMIT 20000", [since]);
   let seq = since;
   const docs = rows.map(r => { if (r.seq > seq) seq = Number(r.seq); return r.deleted ? { c: r.col, i: r.id, x: true } : { c: r.col, i: r.id, d: r.data }; });
   // تقديم المؤشر لتخطّي مستندات الفواتير المستبعَدة (طالما مفيش صفحة ممتلئة)
@@ -521,6 +521,36 @@ app.get('/api/purchase-suggest', auth, async (req, res) => {
     const rows = (await pool.query(sql, P)).rows;
     res.json(rows);
   } catch (e) { res.status(500).json({ error: 'purchase', detail: e.message }); }
+});
+
+// المحاسبة والأرباح — قائمة دخل من الملخّص المالي اليومي (fin_daily)
+app.get('/api/financials', auth, async (req, res) => {
+  try {
+    const re = /^\d{4}-\d{2}-\d{2}$/;
+    const to = re.test(req.query.to || '') ? req.query.to : new Date().toISOString().slice(0, 10);
+    let from = req.query.from;
+    if (!re.test(from || '')) { const d = new Date(to + 'T00:00:00Z'); d.setUTCDate(d.getUTCDate() - 29); from = d.toISOString().slice(0, 10); }
+    const { rows } = await pool.query(
+      `SELECT data->>'date' AS date,
+         COALESCE(NULLIF(data->>'revenue','')::numeric,0) AS revenue,
+         COALESCE(NULLIF(data->>'cogs','')::numeric,0) AS cogs,
+         COALESCE(NULLIF(data->>'discount','')::numeric,0) AS discount,
+         COALESCE(NULLIF(data->>'invoices','')::numeric,0) AS invoices
+       FROM docs WHERE col='fin_daily' AND NOT deleted AND (data->>'date') BETWEEN $1 AND $2
+       ORDER BY data->>'date'`, [from, to]);
+    let revenue = 0, cogs = 0, discount = 0, invoices = 0;
+    const series = rows.map(r => {
+      revenue += +r.revenue; cogs += +r.cogs; discount += +r.discount; invoices += +r.invoices;
+      return { date: r.date, revenue: +r.revenue, cogs: +r.cogs, gross: Math.round((+r.revenue - +r.discount - +r.cogs) * 100) / 100 };
+    });
+    const net_sales = revenue - discount, gross = net_sales - cogs;
+    const rnd = x => Math.round(x * 100) / 100;
+    res.json({
+      from, to, revenue: rnd(revenue), discount: rnd(discount), net_sales: rnd(net_sales),
+      cogs: rnd(cogs), gross: rnd(gross), margin: net_sales ? Math.round(gross / net_sales * 1000) / 10 : 0,
+      invoices, avg_invoice: invoices ? rnd(net_sales / invoices) : 0, series,
+    });
+  } catch (e) { res.status(500).json({ error: 'financials', detail: e.message }); }
 });
 
 // الحضور والانصراف (من Genius) — خادمي
