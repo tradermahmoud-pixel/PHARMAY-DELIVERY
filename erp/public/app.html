@@ -1583,39 +1583,39 @@ function vReport(v){
           <option value="purch" ${repSrc==='purch'?'selected':''}>المشتريات</option>
         </select></label>
       <label class="fld" style="margin:0"><span>تجميع حسب</span>
-        <select onchange="repGroup=this.value;loadReport()">
+        <select onchange="repGroup=this.value;loadRpt()">
           ${REP_GROUPS[repSrc].map(g=>`<option value="${g[0]}" ${repGroup===g[0]?'selected':''}>${g[1]}</option>`).join('')}
         </select></label>
-      <label class="fld" style="margin:0"><span>من</span><input type="date" value="${esc(rptFrom)}" onchange="rptFrom=this.value;loadReport()"></label>
-      <label class="fld" style="margin:0"><span>إلى</span><input type="date" value="${esc(rptTo)}" onchange="rptTo=this.value;loadReport()"></label>
+      <label class="fld" style="margin:0"><span>من</span><input type="date" value="${esc(rptFrom)}" onchange="rptFrom=this.value;loadRpt()"></label>
+      <label class="fld" style="margin:0"><span>إلى</span><input type="date" value="${esc(rptTo)}" onchange="rptTo=this.value;loadRpt()"></label>
     </div>
     <div class="sbar" style="margin-top:4px;flex-wrap:wrap;gap:8px">
-      <div class="seg">${DS.map(d=>`<button onclick="repPreset(${d[0]})">${d[1]}</button>`).join('')}</div>
+      <div class="seg">${DS.map(d=>`<button onclick="rptPreset(${d[0]})">${d[1]}</button>`).join('')}</div>
       <div class="sp" style="flex:1"></div>
-      <button class="btn sm" onclick="copyReport()">${icon('chk')} نسخ / تصدير</button>
+      <button class="btn sm" onclick="copyRpt()">${icon('chk')} نسخ / تصدير</button>
     </div>
   </div>
   <div id="repBody"></div>`;
-  if(rptData===null)loadReport();else renderReport();
+  if(rptData===null)loadRpt();else renderRpt();
 }
-function repPreset(n){const t=new Date();rptTo=t.toISOString().slice(0,10);const f=new Date(t);f.setDate(f.getDate()-(n-1));rptFrom=f.toISOString().slice(0,10);loadReport();}
-function loadReport(){
+function rptPreset(n){const t=new Date();rptTo=t.toISOString().slice(0,10);const f=new Date(t);f.setDate(f.getDate()-(n-1));rptFrom=f.toISOString().slice(0,10);loadRpt();}
+function loadRpt(){
   const my=++rptReq;rptData=null;const b=$('#repBody');if(b)b.innerHTML=`<div class="empty">${icon('report',44)}<div>بحسب التقرير…</div></div>`;
   const u=(window.__BASE__||'')+'/api/report?source='+repSrc+'&group='+repGroup+'&from='+rptFrom+'&to='+rptTo;
-  fetch(u,{credentials:'same-origin'}).then(r=>r.ok?r.json():null).then(j=>{if(my!==rptReq)return;rptData=j||{rows:[],totals:{}};if(route==='report')renderReport();})
-    .catch(()=>{if(my===rptReq){rptData={rows:[],totals:{}};renderReport();}});
+  fetch(u,{credentials:'same-origin'}).then(r=>r.ok?r.json():null).then(j=>{if(my!==rptReq)return;rptData=j||{rows:[],totals:{}};if(route==='report')renderRpt();})
+    .catch(()=>{if(my===rptReq){rptData={rows:[],totals:{}};renderRpt();}});
 }
-function repSortRows(rows){
+function rptSortRows(rows){
   const s=repSort;
   if(s==='label')return rows.slice();
   return rows.slice().sort((a,b)=>(+b[s]||0)-(+a[s]||0));
 }
-function renderReport(){
+function renderRpt(){
   const b=$('#repBody');if(!b)return;const j=rptData;if(!j){b.innerHTML='';return;}
   const rows=j.rows||[], T=j.totals||{}, hasP=j.hasProfit, hasQ=j.hasQty;
   const glbl=REP_GLBL[j.group]||'البند';
   const timeGroup=(j.group==='day'||j.group==='month');
-  const sorted=timeGroup?rows.slice():repSortRows(rows);
+  const sorted=timeGroup?rows.slice():rptSortRows(rows);
   const max=Math.max(1,...sorted.map(r=>Math.abs(+r.amount||0)));
   const kpis=`<div class="kpis" style="grid-template-columns:repeat(auto-fill,minmax(175px,1fr));margin-bottom:12px">
     <div class="kpi accent"><div class="t">${icon('cash')} ${repSrc==='sales'?'إجمالي المبيعات':'إجمالي المشتريات'}</div><div class="v">${money(T.amount)}</div></div>
@@ -1634,19 +1634,19 @@ function renderReport(){
       <td class="num">${num(r.count)}</td>
     </tr>`;}).join(''):`<tr><td colspan="${2+(hasP?1:0)+(hasQ?1:0)+1}"><div class="empty">${icon('report',44)}<div>لا بيانات في الفترة · بتظهر بعد مزامنة Genius</div></div></td></tr>`;
   const sortBtns=timeGroup?'':`<div class="sbar" style="margin-bottom:8px"><span style="font-size:12.5px;color:var(--muted);align-self:center">ترتيب:</span>
-    <div class="seg"><button class="${repSort==='amount'?'on':''}" onclick="repSort='amount';renderReport()">بالمبلغ</button>
-    ${hasP?`<button class="${repSort==='profit'?'on':''}" onclick="repSort='profit';renderReport()">بالربح</button>`:''}
-    ${hasQ?`<button class="${repSort==='qty'?'on':''}" onclick="repSort='qty';renderReport()">بالكمية</button>`:''}
-    <button class="${repSort==='count'?'on':''}" onclick="repSort='count';renderReport()">بالعدد</button></div></div>`;
+    <div class="seg"><button class="${repSort==='amount'?'on':''}" onclick="repSort='amount';renderRpt()">بالمبلغ</button>
+    ${hasP?`<button class="${repSort==='profit'?'on':''}" onclick="repSort='profit';renderRpt()">بالربح</button>`:''}
+    ${hasQ?`<button class="${repSort==='qty'?'on':''}" onclick="repSort='qty';renderRpt()">بالكمية</button>`:''}
+    <button class="${repSort==='count'?'on':''}" onclick="repSort='count';renderRpt()">بالعدد</button></div></div>`;
   b.innerHTML=kpis+sortBtns+`<div class="card"><div class="tbl-wrap"><table class="tbl">
     <thead>${th}</thead><tbody>${body}</tbody></table></div></div>`;
 }
-function copyReport(){
+function copyRpt(){
   const j=rptData;if(!j||!j.rows||!j.rows.length)return toast('مفيش بيانات','err');
   const hasP=j.hasProfit,hasQ=j.hasQty,glbl=REP_GLBL[j.group]||'البند';
   const head=[glbl,'المبلغ',hasP?'الربح':null,hasQ?'الكمية':null,'العدد'].filter(Boolean);
   const timeGroup=(j.group==='day'||j.group==='month');
-  const rows=(timeGroup?j.rows:repSortRows(j.rows)).map(r=>[r.label,num(r.amount),hasP?(r.profit==null?'':num(r.profit)):null,hasQ?(r.qty==null?'':num(r.qty)):null,num(r.count)].filter(x=>x!==null).join('\t'));
+  const rows=(timeGroup?j.rows:rptSortRows(j.rows)).map(r=>[r.label,num(r.amount),hasP?(r.profit==null?'':num(r.profit)):null,hasQ?(r.qty==null?'':num(r.qty)):null,num(r.count)].filter(x=>x!==null).join('\t'));
   const txt=`تقرير ${repSrc==='sales'?'المبيعات':'المشتريات'} — ${REP_GLBL[j.group]} (${j.from} ← ${j.to})\n`+head.join('\t')+'\n'+rows.join('\n')+`\n\nالإجمالي\t${num(j.totals.amount)}${hasP?'\t'+num(j.totals.profit):''}`;
   (navigator.clipboard?navigator.clipboard.writeText(txt):Promise.reject()).then(()=>toast('اتنسخ التقرير ✓','ok')).catch(()=>prompt('انسخ التقرير:',txt));
 }
