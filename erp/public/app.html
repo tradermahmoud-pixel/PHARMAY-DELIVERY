@@ -835,12 +835,14 @@ function copyFin(){
   (navigator.clipboard?navigator.clipboard.writeText(t):Promise.reject()).then(()=>toast('اتنسخ ✓','ok')).catch(()=>prompt('انسخ:',t));
 }
 
-let purchTab='suggest', purchCover=14, purchQ='', purchAll=false, purchData=null, purchReq=0;
+let purchTab='suggest', purchCover=14, purchQ='', purchAll=false, purchVital=false, purchData=null, purchReq=0;
+let poCart=[];  // [{itm,name,qty,price}]
 function vPurch(v){
   v.innerHTML=`
   <div class="sbar">
-    <div class="seg" style="max-width:420px;flex-wrap:wrap">
+    <div class="seg" style="max-width:560px;flex-wrap:wrap">
       <button class="${purchTab==='suggest'?'on':''}" onclick="purchTab='suggest';vPurch($('#view'))">${icon('cart')} النواقص وأمر الشراء</button>
+      <button class="${purchTab==='po'?'on':''}" onclick="purchTab='po';vPurch($('#view'))">${icon('cart')} أوامر الشراء${poCart.length?` <span class="pill g" style="padding:1px 6px">${num(poCart.length)}</span>`:''}</button>
       <button class="${purchTab==='consume'?'on':''}" onclick="purchTab='consume';vPurch($('#view'))">${icon('dash')} معدلات الاستهلاك</button>
       <button class="${purchTab==='dead'?'on':''}" onclick="purchTab='dead';vPurch($('#view'))">${icon('warn')} الراكد</button>
       <button class="${purchTab==='bills'?'on':''}" onclick="purchTab='bills';vPurch($('#view'))">${icon('bill')} فواتير الشرا</button>
@@ -848,6 +850,7 @@ function vPurch(v){
   </div>
   <div id="purchBody"></div>`;
   if(purchTab==='suggest'){renderPurchSuggest();if(purchData===null)loadPurchSuggest();}
+  else if(purchTab==='po'){renderPO();if(poData===null)loadPO();}
   else if(purchTab==='consume'){renderConsume();if(consData===null)loadConsume();}
   else if(purchTab==='dead'){renderDead();if(deadData===null)loadDead();}
   else renderPurchBills();
@@ -935,37 +938,51 @@ function copyConsume(){
 }
 function loadPurchSuggest(){
   const my=++purchReq;
-  const u=(window.__BASE__||'')+'/api/purchase-suggest?cover='+purchCover+'&all='+(purchAll?'1':'0')+'&q='+encodeURIComponent(purchQ.trim());
+  const u=(window.__BASE__||'')+'/api/purchase-suggest?cover='+purchCover+'&all='+(purchAll?'1':'0')+'&vital='+(purchVital?'1':'0')+'&q='+encodeURIComponent(purchQ.trim());
   fetch(u,{credentials:'same-origin'}).then(r=>r.ok?r.json():[]).then(j=>{if(my!==purchReq)return;purchData=Array.isArray(j)?j:[];if(route==='purch'&&purchTab==='suggest')renderPurchSuggest();})
     .catch(()=>{if(my===purchReq){purchData=[];renderPurchSuggest();}});
+}
+function itmNum(id){return parseInt(String(id).replace(/^gen_/,''),10);}
+function inCart(itm){return poCart.some(l=>l.itm===itm);}
+function cartAdd(itm,name,qty,price){ if(inCart(itm)){toast('الصنف مضاف بالفعل','err');return;} poCart.push({itm,name,qty:+qty||1,price:+price||0}); toast('اتضاف لأمر الشراء ✓','ok'); vPurch($('#view')); }
+function toggleVital(id,on){
+  MZ.post('/api/vital',{id,vital:on}).then(()=>{loadPurchSuggest();toast(on?'اتعلّم حيوي ⭐':'اتشال من الحيوي','ok');}).catch(()=>toast('تعذّر','err'));
 }
 function renderPurchSuggest(){
   const b=$('#purchBody');if(!b)return;
   const COV=[[7,'أسبوع'],[14,'أسبوعين'],[30,'شهر'],[60,'شهرين']];
   const rows=purchData;
-  const head=`
+  const cartBar=poCart.length?`<div class="card" style="margin-bottom:10px;display:flex;align-items:center;gap:10px;flex-wrap:wrap;background:var(--surface2)">
+    <b>${icon('cart')} أمر الشراء: ${num(poCart.length)} صنف</b>
+    <div class="sp" style="flex:1"></div>
+    <button class="btn pri sm" onclick="poReview()">مراجعة وإرسال لـ Genius</button>
+    <button class="btn sm" onclick="poCart=[];vPurch($('#view'))">تفريغ</button>
+  </div>`:'';
+  const head=cartBar+`
   <div class="sbar" style="flex-wrap:wrap;gap:8px">
     <div class="search" style="min-width:200px">${icon('search')}<input id="pq" placeholder="بحث في الأصناف…" value="${esc(purchQ)}"></div>
     <div class="seg">${COV.map(c=>`<button class="${purchCover===c[0]?'on':''}" onclick="purchCover=${c[0]};loadPurchSuggest()">${c[1]}</button>`).join('')}</div>
-    <label class="fld" style="margin:0;flex-direction:row;align-items:center;gap:6px"><input type="checkbox" ${purchAll?'checked':''} onchange="purchAll=this.checked;loadPurchSuggest()" style="width:auto"> <span style="margin:0;font-size:13px">عرض الكل مش النواقص بس</span></label>
+    <label class="fld" style="margin:0;flex-direction:row;align-items:center;gap:6px"><input type="checkbox" ${purchAll?'checked':''} onchange="purchAll=this.checked;loadPurchSuggest()" style="width:auto"> <span style="margin:0;font-size:13px">عرض الكل</span></label>
+    <label class="fld" style="margin:0;flex-direction:row;align-items:center;gap:6px"><input type="checkbox" ${purchVital?'checked':''} onchange="purchVital=this.checked;loadPurchSuggest()" style="width:auto"> <span style="margin:0;font-size:13px">⭐ الحيوية فقط</span></label>
     <div class="sp" style="flex:1"></div>
-    <button class="btn sm" onclick="copyPurchOrder()">${icon('chk')} نسخ أمر الشراء</button>
+    <button class="btn sm" onclick="copyPurchOrder()">${icon('chk')} نسخ</button>
   </div>
-  <p style="color:var(--muted);font-size:12px;margin:0 0 10px">المقترح = كمية تكفي الفترة المختارة حسب معدل البيع، ناقص المتاح. مرتّب بالأكثر إلحاحًا (اللي قرب يخلص).</p>`;
+  <p style="color:var(--muted);font-size:12px;margin:0 0 10px">المقترح = كمية تكفي الفترة حسب معدل البيع ناقص المتاح. ⭐ = صنف حيوي (اضغط النجمة للتعليم اليدوي). زرار ＋ يضيف الصنف لأمر الشراء.</p>`;
   if(rows===null){b.innerHTML=head+`<div class="empty">${icon('cart',44)}<div>بحمّل…</div></div>`;wirePQ();return;}
   const body=`<div class="card"><div class="tbl-wrap"><table class="tbl">
-    <thead><tr><th>الصنف</th><th>المتاح</th><th>بيع ٣٠ي</th><th>بيع ٩٠ي</th><th>معدل/يوم</th><th>يكفي</th><th>المقترح طلبه</th></tr></thead>
-    <tbody>${rows.length?rows.map(r=>{const dc=r.days_cover==null?null:+r.days_cover;const urgent=dc!=null&&dc<=7;return `<tr>
-      <td style="font-weight:600">${esc(r.name||'—')}${r.name_ar?`<div style="font-size:11px;color:var(--muted)">${esc(r.name_ar)}</div>`:''}</td>
-      <td class="num ${+r.stock<=0?'':''}" style="${+r.stock<=0?'color:var(--danger);font-weight:700':''}">${num(r.stock)}</td>
-      <td class="num">${num(r.q30)}</td>
+    <thead><tr><th></th><th>الصنف</th><th>المتاح</th><th>بيع ٩٠ي</th><th>معدل/يوم</th><th>يكفي</th><th>المقترح</th><th>طلب</th></tr></thead>
+    <tbody>${rows.length?rows.map(r=>{const dc=r.days_cover==null?null:+r.days_cover;const urgent=dc!=null&&dc<=7;const it=itmNum(r.id);const nm=(r.name||'').replace(/'/g,'');return `<tr${r.vital?' style="background:color-mix(in srgb,var(--danger) 5%,transparent)"':''}>
+      <td style="width:28px"><span title="حيوي" style="cursor:pointer;font-size:15px;opacity:${r.vital?1:.25}" onclick="toggleVital('${esc(r.id)}',${r.vital_src==='manual'?'false':'true'})">⭐</span></td>
+      <td style="font-weight:600">${esc(r.name||'—')}${r.vital?` <span class="pill r" style="padding:1px 6px">حيوي${r.vital_src==='auto'?' (حركة)':''}</span>`:''}${r.name_ar?`<div style="font-size:11px;color:var(--muted)">${esc(r.name_ar)}</div>`:''}</td>
+      <td class="num" style="${+r.stock<=0?'color:var(--danger);font-weight:700':''}">${num(r.stock)}</td>
       <td class="num">${num(r.q90)}</td>
       <td class="num">${num(r.avg_daily)}</td>
       <td class="num">${dc==null?'—':`<span class="pill ${urgent?'r':'n'}">${num(dc)} يوم</span>`}</td>
       <td class="num"><b style="color:var(--brand)">${num(r.suggest)}</b></td>
-    </tr>`}).join(''):`<tr><td colspan=7><div class="empty">${icon('chk',44)}<div>${purchAll?'لا أصناف':'مفيش نواقص — كل الأصناف كفايتها كويسة 👍'}</div></div></td></tr>`}</tbody>
+      <td class="num" style="white-space:nowrap">${inCart(it)?'<span class="pill g">مضاف</span>':`<button class="ic-btn" title="أضف لأمر الشراء" onclick="cartAdd(${it},'${esc(nm)}',${+r.suggest||1},${+r.avg_cost||0})">${icon('plus')}</button>`}</td>
+    </tr>`}).join(''):`<tr><td colspan=8><div class="empty">${icon('chk',44)}<div>${purchVital?'مفيش نواقص في الأصناف الحيوية 👍':purchAll?'لا أصناف':'مفيش نواقص — كل الأصناف كفايتها كويسة 👍'}</div></div></td></tr>`}</tbody>
   </table></div></div>
-  ${rows.length?`<p style="color:var(--muted);font-size:12px;margin-top:8px">${num(rows.length)} صنف${purchAll?'':' محتاج طلب'}</p>`:''}`;
+  ${rows.length?`<p style="color:var(--muted);font-size:12px;margin-top:8px">${num(rows.length)} صنف</p>`:''}`;
   b.innerHTML=head+body;wirePQ();
 }
 function wirePQ(){const q=$('#pq');if(q)q.oninput=e=>{purchQ=e.target.value;clearTimeout(rT);rT=setTimeout(loadPurchSuggest,300)};}
@@ -974,6 +991,78 @@ function copyPurchOrder(){
   const txt='أمر شراء — '+new Date().toLocaleDateString('ar-EG')+'\n\n'+purchData.map(r=>`${r.name} × ${num(r.suggest)}`).join('\n');
   (navigator.clipboard?navigator.clipboard.writeText(txt):Promise.reject()).then(()=>toast('اتنسخ أمر الشراء ✓','ok')).catch(()=>{prompt('انسخ أمر الشراء:',txt)});
 }
+
+/* ---------- مراجعة أمر الشراء وإرساله ---------- */
+function poReview(){
+  if(!poCart.length)return toast('أمر الشراء فاضي','err');
+  const vopts=arr('vendors').map(x=>`<option value="${esc(x.name)}">`).join('');
+  const lines=poCart.map((l,i)=>`<tr>
+    <td style="font-weight:600">${esc(l.name)}</td>
+    <td style="width:90px"><input id="poq_${i}" type="number" min="1" step="1" value="${l.qty}" style="width:80px;text-align:center"></td>
+    <td style="width:110px"><input id="pop_${i}" type="number" min="0" step="0.01" value="${l.price||''}" placeholder="تلقائي" style="width:100px;text-align:center"></td>
+    <td style="width:36px"><button class="ic-btn" title="حذف" onclick="poCart.splice(${i},1);closeModal();poReview()">${icon('trash')}</button></td>
+  </tr>`).join('');
+  modal('أمر شراء جديد → Genius',`
+    <label class="fld"><span>المورد (بالاسم أو الكود) *</span>
+      <input id="po_vend" list="po_vlist" placeholder="اكتب اسم المورد" autocomplete="off">
+      <datalist id="po_vlist">${vopts}</datalist></label>
+    <div class="tbl-wrap" style="max-height:46vh;overflow:auto"><table class="tbl">
+      <thead><tr><th>الصنف</th><th>الكمية</th><th>سعر الشرا</th><th></th></tr></thead>
+      <tbody>${lines||`<tr><td colspan=4><div class="empty">فاضي</div></td></tr>`}</tbody></table></div>
+    <label class="fld"><span>ملاحظات</span><input id="po_notes" placeholder="اختياري"></label>
+    <p style="color:var(--muted);font-size:12px;margin:8px 0 0">«تحويل لـ Genius» بيسجّل الأمر كمعلّق — وبيتكتب فعليًا كفاتورة شراء على Genius لما تشغّل أداة الأجنت على جهاز الصيدلية. سعر الشرا الفاضي هيتحدّد تلقائيًا من آخر سعر للصنف.</p>
+    <div style="margin-top:10px"><button class="btn" onclick="poSubmit('draft')">${icon('chk')} حفظ كمسودة</button></div>
+  `,'تحويل لـ Genius',()=>poSubmit('pending'),'lg');
+}
+function poSubmit(status){
+  const vname=fval('po_vend').trim();
+  if(!vname)return toast('اكتب اسم المورد','err');
+  const vv=arr('vendors').find(x=>arNormJs(x.name)===arNormJs(vname))||arr('vendors').find(x=>arNormJs(x.name).includes(arNormJs(vname)));
+  if(!vv)return toast('المورد مش موجود في القائمة','err');
+  poCart.forEach((l,i)=>{const q=document.getElementById('poq_'+i),p=document.getElementById('pop_'+i);if(q)l.qty=+q.value||l.qty;if(p)l.price=+p.value||0;});
+  const payload={vendor_id:itmNum(vv.id),vendor_name:vv.name,vendor_code:vv.code||'',lines:poCart,notes:fval('po_notes'),status};
+  MZ.post('/api/po',payload).then(()=>{
+    poCart=[];closeModal();poData=null;purchTab='po';
+    toast(status==='pending'?'اتبعت — هتتكتب على Genius عند تشغيل الأجنت ✓':'اتحفظت كمسودة ✓','ok');
+    vPurch($('#view'));
+  }).catch(e=>toast(e.message||'تعذّر الحفظ','err'));
+}
+
+/* ---------- قائمة أوامر الشراء ---------- */
+let poData=null, poReq=0;
+const PO_ST={draft:['مسودة','n'],pending:['معلّق — بانتظار الأجنت','w'],done:['تم ✓','g'],failed:['فشل','r']};
+function loadPO(){
+  const my=++poReq;
+  fetch((window.__BASE__||'')+'/api/po',{credentials:'same-origin'}).then(r=>r.ok?r.json():[]).then(j=>{if(my!==poReq)return;poData=Array.isArray(j)?j:[];if(route==='purch'&&purchTab==='po')renderPO();})
+    .catch(()=>{if(my===poReq){poData=[];renderPO();}});
+}
+function renderPO(){
+  const b=$('#purchBody');if(!b)return;
+  const head=`<div class="sbar"><div class="sp" style="flex:1"></div>
+    ${poCart.length?`<button class="btn pri sm" onclick="poReview()">${icon('cart')} مراجعة أمر الشراء (${num(poCart.length)})</button>`:''}
+    <button class="btn sm" onclick="loadPO()">${icon('chk')} تحديث</button></div>
+  <p style="color:var(--muted);font-size:12px;margin:0 0 10px">أوامر الشراء اللي اتعملت. «معلّق» = بانتظار تشغيل أداة الأجنت على جهاز الصيدلية عشان تتكتب كفاتورة على Genius.</p>`;
+  if(poData===null){b.innerHTML=head+`<div class="empty">${icon('cart',44)}<div>بحمّل…</div></div>`;return;}
+  const rows=poData;
+  b.innerHTML=head+`<div class="card"><div class="tbl-wrap"><table class="tbl">
+    <thead><tr><th>#</th><th>المورد</th><th>أصناف</th><th>الحالة</th><th>فاتورة Genius</th><th>التاريخ</th><th></th></tr></thead>
+    <tbody>${rows.length?rows.map(p=>{const st=PO_ST[p.status]||['?','n'];return `<tr>
+      <td class="num">${esc(p.no||'')}</td>
+      <td style="font-weight:600">${esc(p.vendor_name||'—')}</td>
+      <td style="font-size:12.5px;color:var(--muted);max-width:280px">${esc(p.lines?p.lines.map(l=>l.name+'×'+l.qty).join('، ').slice(0,90):'')}${(p.lines&&p.lines.length)?` (${num(p.lines.length)})`:''}</td>
+      <td><span class="pill ${st[1]}">${st[0]}</span>${p.status==='failed'&&p.error?`<div style="font-size:11px;color:var(--danger)">${esc(p.error)}</div>`:''}</td>
+      <td class="num">${p.genius_pth?`<b>${esc(String(p.genius_pth))}</b>`:'—'}</td>
+      <td class="num" style="font-size:11px;color:var(--muted)">${p.at?fmtDT(p.at):''}</td>
+      <td style="white-space:nowrap">
+        ${p.status==='failed'?`<button class="ic-btn" title="إعادة إرسال" onclick="poResend('${p.id}')">${icon('refresh')}</button>`:''}
+        ${(p.status==='draft'||p.status==='failed')?`<button class="ic-btn" title="حذف" onclick="poDel('${p.id}')">${icon('trash')}</button>`:''}
+        ${p.status==='draft'?`<button class="ic-btn" title="تحويل لـ Genius" onclick="poSend('${p.id}')">${icon('plus')}</button>`:''}
+      </td></tr>`}).join(''):`<tr><td colspan=7><div class="empty">${icon('cart',44)}<div>مفيش أوامر شراء · ابدأ من تبويب «النواقص وأمر الشراء»</div></div></td></tr>`}</tbody>
+  </table></div></div>`;
+}
+function poSend(id){const p=(poData||[]).find(x=>x.id===id);if(!p)return;MZ.post('/api/po',{id,vendor_id:p.vendor_id,vendor_name:p.vendor_name,vendor_code:p.vendor_code,lines:p.lines,notes:p.notes,no:p.no,status:'pending'}).then(()=>{poData=null;toast('اتبعت ✓','ok');renderPO();loadPO();}).catch(()=>toast('تعذّر','err'));}
+function poResend(id){poSend(id);}
+function poDel(id){confirmDel('حذف أمر الشراء ده؟',()=>{MZ.del('/api/po/'+id).then(()=>{poData=null;toast('اتحذف','ok');loadPO();}).catch(()=>toast('تعذّر','err'));});}
 let billsDays=30, billsQ='', billsData=null, billsReq=0;
 function loadBills(){
   const my=++billsReq;

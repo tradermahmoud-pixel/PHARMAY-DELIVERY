@@ -206,7 +206,7 @@ app.get('/api/sync', auth, async (req, res) => {
   const since = parseInt(req.query.since, 10) || 0;
   // الفواتير والأصناف مش بتتزامن للعميل (كتير جدًا) — بتتقرى من endpoints مخصصة عشان الأداء
   const { rows } = await pool.query(
-    "SELECT col,id,data,deleted,seq FROM docs WHERE seq>$1 AND col NOT IN ('sales','items','customers','istats','attendance','gpur','fin_daily','sret','pret','vled','cled','cheques','gcash','gdrawers','gacct','gshifts') ORDER BY seq LIMIT 20000", [since]);
+    "SELECT col,id,data,deleted,seq FROM docs WHERE seq>$1 AND col NOT IN ('sales','items','customers','istats','attendance','gpur','fin_daily','sret','pret','vled','cled','cheques','gcash','gdrawers','gacct','gshifts','po','vital') ORDER BY seq LIMIT 20000", [since]);
   let seq = since;
   const docs = rows.map(r => { if (r.seq > seq) seq = Number(r.seq); return r.deleted ? { c: r.col, i: r.id, x: true } : { c: r.col, i: r.id, d: r.data }; });
   // تقديم المؤشر لتخطّي مستندات الفواتير المستبعَدة (طالما مفيش صفحة ممتلئة)
@@ -593,26 +593,128 @@ app.get('/api/purchase-suggest', auth, async (req, res) => {
     let where = `i.col='items' AND NOT i.deleted AND COALESCE(NULLIF(s.data->>'q90','')::numeric,0) > 0`;
     toks.forEach(t => { where += ` AND ${SA} LIKE ${p('%' + t + '%')}`; });
     const onlyShort = req.query.all !== '1';
+    const vitalOnly = req.query.vital === '1';
     const stockE = `COALESCE(NULLIF(i.data->>'stock','')::numeric,0)`;
     const avgE = `(COALESCE(NULLIF(s.data->>'q90','')::numeric,0)/90.0)`;
     const needE = `($1::numeric*${avgE} - ${stockE})`;
     if (onlyShort) where += ` AND ${needE} > 0`;
+    // عتبة «حيوي تلقائي»: الصنف ضمن أعلى 20% استهلاكًا (q90)
+    const thr = Number((await pool.query(
+      `SELECT COALESCE(percentile_cont(0.8) WITHIN GROUP (ORDER BY (data->>'q90')::numeric),0) t
+       FROM docs WHERE col='istats' AND NOT deleted AND COALESCE(NULLIF(data->>'q90','')::numeric,0) > 0`)).rows[0].t) || 0;
+    const q90E = `COALESCE(NULLIF(s.data->>'q90','')::numeric,0)`;
+    const vitalE = `(v.id IS NOT NULL OR ${q90E} >= ${thr})`;
+    if (vitalOnly) where += ` AND ${vitalE}`;
     P.push(lim);
     const sql = `SELECT i.data->>'name' AS name, i.data->>'name_ar' AS name_ar, i.data->>'barcode' AS barcode,
         i.id, ${stockE} AS stock,
         COALESCE(NULLIF(s.data->>'q30','')::numeric,0) AS q30,
-        COALESCE(NULLIF(s.data->>'q90','')::numeric,0) AS q90,
+        ${q90E} AS q90,
         s.data->>'last_sold' AS last_sold,
         ROUND(${avgE},2) AS avg_daily,
         CASE WHEN ${avgE} > 0 THEN ROUND(${stockE}/${avgE},0) ELSE NULL END AS days_cover,
-        GREATEST(0, CEIL(${needE})) AS suggest
+        GREATEST(0, CEIL(${needE})) AS suggest,
+        (v.id IS NOT NULL) AS vital_manual,
+        ${vitalE} AS vital,
+        COALESCE(NULLIF(s.data->>'avg_cost','')::numeric,0) AS avg_cost
       FROM docs i LEFT JOIN docs s ON s.col='istats' AND s.id=i.id
+        LEFT JOIN docs v ON v.col='vital' AND v.id=i.id AND NOT v.deleted
       WHERE ${where}
-      ORDER BY CASE WHEN ${avgE}>0 THEN ${stockE}/${avgE} ELSE 999999 END ASC, q90 DESC
+      ORDER BY ${vitalE} DESC, CASE WHEN ${avgE}>0 THEN ${stockE}/${avgE} ELSE 999999 END ASC, q90 DESC
       LIMIT $${P.length}`;
     const rows = (await pool.query(sql, P)).rows;
-    res.json(rows);
+    res.json(rows.map(r => ({ ...r, vital_src: r.vital_manual ? 'manual' : (r.vital ? 'auto' : '') })));
   } catch (e) { res.status(500).json({ error: 'purchase', detail: e.message }); }
+});
+
+/* ===== الأصناف الحيوية + أوامر الشراء (تتحوّل لـ Genius كفاتورة عبر الأجنت) ===== */
+// تعليم/إلغاء صنف حيوي يدويًا
+app.post('/api/vital', auth, async (req, res) => {
+  try {
+    const id = String(req.body && req.body.id || '').trim();
+    if (!id) return res.status(400).json({ error: 'id required' });
+    const on = !!(req.body && req.body.vital);
+    if (on) {
+      await pool.query(`INSERT INTO docs(col,id,data,deleted,seq,updated_at,updated_by)
+        VALUES('vital',$1,$2,false,nextval('doc_seq'),$3,$4)
+        ON CONFLICT (col,id) DO UPDATE SET data=EXCLUDED.data, deleted=false, seq=nextval('doc_seq'), updated_at=$3`,
+        [id, { vital: true, by: req.user.name, at: now() }, now(), req.user.id]);
+    } else {
+      await pool.query(`UPDATE docs SET deleted=true, seq=nextval('doc_seq'), updated_at=$2 WHERE col='vital' AND id=$1`, [id, now()]);
+    }
+    bustSummaries();
+    res.json({ ok: true, id, vital: on });
+  } catch (e) { res.status(500).json({ error: 'vital', detail: e.message }); }
+});
+
+app.get('/api/po', auth, async (_req, res) => {
+  try {
+    const { rows } = await pool.query(`SELECT id,data FROM docs WHERE col='po' AND NOT deleted ORDER BY COALESCE((data->>'at')::bigint,0) DESC LIMIT 300`);
+    res.json(rows.map(r => ({ id: r.id, ...r.data })));
+  } catch (e) { res.status(500).json({ error: 'po', detail: e.message }); }
+});
+
+// إنشاء/تعديل أمر شراء (status: draft | pending)
+app.post('/api/po', auth, async (req, res) => {
+  try {
+    const b = req.body || {};
+    const id = String(b.id || ('po_' + Date.now()));
+    const lines = Array.isArray(b.lines) ? b.lines.filter(l => l && l.itm && (+l.qty) > 0).map(l => ({
+      itm: parseInt(l.itm, 10), name: String(l.name || ''), qty: +l.qty, price: +l.price || 0,
+    })) : [];
+    if (!lines.length) return res.status(400).json({ error: 'لا توجد أصناف' });
+    if (!b.vendor_id) return res.status(400).json({ error: 'اختر المورد' });
+    const status = b.status === 'pending' ? 'pending' : 'draft';
+    const total = lines.reduce((s, l) => s + l.qty * l.price, 0);
+    const data = {
+      no: String(b.no || id.replace('po_', '')),
+      vendor_id: parseInt(b.vendor_id, 10) || null, vendor_name: String(b.vendor_name || ''), vendor_code: String(b.vendor_code || ''),
+      lines, total: Math.round(total * 100) / 100, notes: String(b.notes || ''),
+      status, by: req.user.name, at: now(), genius_pth: b.genius_pth || null, error: null,
+    };
+    await pool.query(`INSERT INTO docs(col,id,data,deleted,seq,updated_at,updated_by)
+       VALUES('po',$1,$2,false,nextval('doc_seq'),$3,$4)
+       ON CONFLICT (col,id) DO UPDATE SET data=EXCLUDED.data, deleted=false, seq=nextval('doc_seq'), updated_at=$3`,
+      [id, data, now(), req.user.id]);
+    if (status === 'pending') logAudit(req.user, 'po.send', `أمر شراء ${data.no} ← ${data.vendor_name} (${lines.length} صنف)`);
+    bustSummaries();
+    res.json({ ok: true, id, ...data });
+  } catch (e) { res.status(500).json({ error: 'po-save', detail: e.message }); }
+});
+
+app.delete('/api/po/:id', auth, async (req, res) => {
+  try {
+    await pool.query(`UPDATE docs SET deleted=true, seq=nextval('doc_seq'), updated_at=$2 WHERE col='po' AND id=$1`, [String(req.params.id), now()]);
+    res.json({ ok: true });
+  } catch (e) { res.status(500).json({ error: 'po-del', detail: e.message }); }
+});
+
+// (أجنت) سحب أوامر الشراء المعلّقة للكتابة في Genius
+app.get('/api/po-pull', async (req, res) => {
+  const tok = process.env.ERP_SYNC_TOKEN;
+  if (!tok || req.get('X-Sync-Token') !== tok) return res.status(403).json({ error: 'forbidden' });
+  try {
+    const { rows } = await pool.query(`SELECT id,data FROM docs WHERE col='po' AND NOT deleted AND data->>'status'='pending' ORDER BY COALESCE((data->>'at')::bigint,0) ASC LIMIT 50`);
+    res.json(rows.map(r => ({ id: r.id, ...r.data })));
+  } catch (e) { res.status(500).json({ error: 'po-pull', detail: e.message }); }
+});
+
+// (أجنت) تأكيد كتابة أمر الشراء في Genius
+app.post('/api/po-confirm', async (req, res) => {
+  const tok = process.env.ERP_SYNC_TOKEN;
+  if (!tok || req.get('X-Sync-Token') !== tok) return res.status(403).json({ error: 'forbidden' });
+  try {
+    const id = String(req.body && req.body.id || '');
+    if (!id) return res.status(400).json({ error: 'id required' });
+    const cur = await pool.query(`SELECT data FROM docs WHERE col='po' AND id=$1`, [id]);
+    if (!cur.rows.length) return res.status(404).json({ error: 'not found' });
+    const data = cur.rows[0].data;
+    if (req.body.ok) { data.status = 'done'; data.genius_pth = req.body.pth || null; data.error = null; data.done_at = now(); }
+    else { data.status = 'failed'; data.error = String(req.body.error || 'خطأ غير معروف'); }
+    await pool.query(`UPDATE docs SET data=$2, seq=nextval('doc_seq'), updated_at=$3 WHERE col='po' AND id=$1`, [id, data, now()]);
+    bustSummaries();
+    res.json({ ok: true });
+  } catch (e) { res.status(500).json({ error: 'po-confirm', detail: e.message }); }
 });
 
 // المحاسبة والأرباح — قائمة دخل من الملخّص المالي اليومي (fin_daily)
