@@ -978,7 +978,7 @@ function renderPurchSuggest(){
   const cartBar=poCart.length?`<div class="card" style="margin-bottom:10px;display:flex;align-items:center;gap:10px;flex-wrap:wrap;background:var(--surface2)">
     <b>${icon('cart')} أمر الشراء: ${num(poCart.length)} صنف</b>
     <div class="sp" style="flex:1"></div>
-    <button class="btn pri sm" onclick="poReview()">مراجعة وإرسال لـ Genius</button>
+    <button class="btn pri sm" onclick="poReview(true)">مراجعة وإرسال لـ Genius</button>
     <button class="btn sm" onclick="poCart=[];vPurch($('#view'))">تفريغ</button>
   </div>`:'';
   const head=cartBar+`
@@ -1045,7 +1045,16 @@ function copyPurchOrder(){
 }
 
 /* ---------- مراجعة أمر الشراء وإرساله ---------- */
-function poReview(){
+let poEdit=null;  /* {id,no,vendor_name} لما نكون بنعدّل مسودة قائمة */
+function poEditOpen(id){
+  const p=(poData||[]).find(x=>x.id===id);
+  if(!p){toast('مش لاقي الأمر','err');return;}
+  poEdit={id:p.id,no:p.no,vendor_name:p.vendor_name||'',notes:p.notes||''};
+  poCart=(p.lines||[]).map(l=>({itm:l.itm,name:l.name,qty:+l.qty||1,price:+l.price||0,disc:+l.disc||0,exp:l.exp||null}));
+  poReview();
+}
+function poReview(fresh){
+  if(fresh)poEdit=null;
   if(!poCart.length)return toast('أمر الشراء فاضي','err');
   const vopts=arr('vendors').map(x=>`<option value="${esc(x.name)}">`).join('');
   const lines=poCart.map((l,i)=>{const net=(+l.price||0)*(1-(+l.disc||0)/100);return `<tr>
@@ -1057,15 +1066,15 @@ function poReview(){
     <td style="width:80px" class="num"><span id="pon_${i}">${net?moneyp(net*(+l.qty||0)):'—'}</span></td>
     <td style="width:34px"><button class="ic-btn" title="حذف" onclick="poCart.splice(${i},1);closeModal();poReview()">${icon('trash')}</button></td>
   </tr>`}).join('');
-  modal('أمر شراء جديد → Genius',`
+  modal(poEdit?('تعديل أمر الشراء #'+esc(poEdit.no||'')+' → Genius'):'أمر شراء جديد → Genius',`
     <label class="fld"><span>المورد (بالاسم أو الكود) *</span>
-      <input id="po_vend" list="po_vlist" placeholder="اكتب اسم المورد" autocomplete="off">
+      <input id="po_vend" list="po_vlist" placeholder="اكتب اسم المورد" autocomplete="off" value="${esc(poEdit?poEdit.vendor_name:'')}">
       <datalist id="po_vlist">${vopts}</datalist></label>
     <div class="tbl-wrap" style="max-height:44vh;overflow:auto"><table class="tbl">
       <thead><tr><th>الصنف</th><th>كمية</th><th>سعر الشرا</th><th>خصم٪</th><th>الصلاحية</th><th>الصافي</th><th></th></tr></thead>
       <tbody>${lines||`<tr><td colspan=7><div class="empty">فاضي</div></td></tr>`}</tbody></table></div>
     <div style="text-align:left;font-weight:700;margin:6px 2px">الإجمالي: <span id="po_tot">—</span></div>
-    <label class="fld"><span>ملاحظات</span><input id="po_notes" placeholder="اختياري"></label>
+    <label class="fld"><span>ملاحظات</span><input id="po_notes" placeholder="اختياري" value="${esc(poEdit?poEdit.notes:'')}"></label>
     <p style="color:var(--muted);font-size:12px;margin:8px 0 0">«تحويل لـ Genius» بيسجّل الأمر كمعلّق — وبيتكتب فعليًا كفاتورة شراء على Genius لما تشغّل أداة الأجنت. سعر الشرا الفاضي هيتحدّد تلقائيًا من آخر سعر. الخصم٪ بيتخصم من سعر الشرا لحساب التكلفة الصافية. الصلاحية بتحدّد شريحة المخزون.</p>
     <div style="margin-top:10px"><button class="btn" onclick="poSubmit('draft')">${icon('chk')} حفظ كمسودة</button></div>
   `,'تحويل لـ Genius',()=>poSubmit('pending'),'lg');
@@ -1092,8 +1101,9 @@ function poSubmit(status){
   if(!vv)return toast('المورد مش موجود في القائمة','err');
   poReadLines();
   const payload={vendor_id:itmNum(vv.id),vendor_name:vv.name,vendor_code:vv.code||'',lines:poCart,notes:fval('po_notes'),status};
+  if(poEdit){payload.id=poEdit.id;if(poEdit.no)payload.no=poEdit.no;}
   MZ.post('/api/po',payload).then(()=>{
-    poCart=[];closeModal();poData=null;purchTab='po';
+    poCart=[];poEdit=null;closeModal();poData=null;purchTab='po';
     toast(status==='pending'?'اتبعت — هتتكتب على Genius عند تشغيل الأجنت ✓':'اتحفظت كمسودة ✓','ok');
     vPurch($('#view'));
   }).catch(e=>toast(e.message||'تعذّر الحفظ','err'));
@@ -1110,7 +1120,7 @@ function loadPO(){
 function renderPO(){
   const b=$('#purchBody');if(!b)return;
   const head=`<div class="sbar"><div class="sp" style="flex:1"></div>
-    ${poCart.length?`<button class="btn pri sm" onclick="poReview()">${icon('cart')} مراجعة أمر الشراء (${num(poCart.length)})</button>`:''}
+    ${poCart.length?`<button class="btn pri sm" onclick="poReview(true)">${icon('cart')} مراجعة أمر الشراء (${num(poCart.length)})</button>`:''}
     <button class="btn sm" onclick="loadPO()">${icon('chk')} تحديث</button></div>
   <p style="color:var(--muted);font-size:12px;margin:0 0 10px">أوامر الشراء اللي اتعملت. «معلّق» = بانتظار تشغيل أداة الأجنت على جهاز الصيدلية عشان تتكتب كفاتورة على Genius.</p>`;
   if(poData===null){b.innerHTML=head+`<div class="empty">${icon('cart',44)}<div>بحمّل…</div></div>`;return;}
@@ -1125,6 +1135,7 @@ function renderPO(){
       <td class="num">${p.genius_pth?`<b>${esc(String(p.genius_pth))}</b>`:'—'}</td>
       <td class="num" style="font-size:11px;color:var(--muted)">${p.at?fmtDT(p.at):''}</td>
       <td style="white-space:nowrap">
+        ${(p.status==='draft'||p.status==='failed')?`<button class="ic-btn" title="تعديل" onclick="poEditOpen('${p.id}')">${icon('edit')}</button>`:''}
         ${p.status==='failed'?`<button class="ic-btn" title="إعادة إرسال" onclick="poResend('${p.id}')">${icon('refresh')}</button>`:''}
         ${(p.status==='draft'||p.status==='failed')?`<button class="ic-btn" title="حذف" onclick="poDel('${p.id}')">${icon('trash')}</button>`:''}
         ${p.status==='draft'?`<button class="ic-btn" title="تحويل لـ Genius" onclick="poSend('${p.id}')">${icon('plus')}</button>`:''}
