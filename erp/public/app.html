@@ -235,6 +235,27 @@ const dmy=d=>{if(!d)return'';const x=new Date(d);return x.toLocaleDateString('ar
 const dtm=t=>{if(!t)return'';const x=new Date(t);return x.toLocaleString('ar-EG',{day:'2-digit',month:'short',hour:'2-digit',minute:'2-digit'})};
 function toast(msg,kind){const t=ce('div');t.className='toast '+(kind||'');t.textContent=msg;$('#toast').appendChild(t);setTimeout(()=>{t.style.opacity=0;t.style.transition='opacity .3s';setTimeout(()=>t.remove(),300)},2200)}
 
+/* يحافظ على مكان مؤشر الكتابة في خانات البحث بعد إعادة رسم الشاشة */
+(function(){
+  let ls=null, lt=0;
+  document.addEventListener('input',function(e){
+    const t=e.target;
+    if(t&&t.tagName==='INPUT'&&t.id&&typeof t.closest==='function'&&t.closest('.search')){
+      let pos; try{pos=t.selectionStart;}catch(_){pos=null;}
+      ls={id:t.id,pos:pos}; lt=Date.now();
+    }
+  },true);
+  function restore(){
+    if(!ls||Date.now()-lt>2500)return;
+    const el=document.getElementById(ls.id);
+    if(el&&document.activeElement!==el){
+      try{el.focus(); if(ls.pos!=null)el.setSelectionRange(ls.pos,ls.pos);}catch(_){}
+    }
+  }
+  function start(){const tgt=document.getElementById('view')||document.body;if(tgt)new MutationObserver(restore).observe(tgt,{childList:true,subtree:true});}
+  if(document.readyState!=='loading')start(); else document.addEventListener('DOMContentLoaded',start);
+})();
+
 /* icons */
 const IC={
   dash:'<path d="M4 13h7V4H4zM13 20h7V9h-7zM13 4v3h7V4zM4 20h7v-5H4z"/>',
