@@ -206,7 +206,7 @@ app.get('/api/sync', auth, async (req, res) => {
   const since = parseInt(req.query.since, 10) || 0;
   // الفواتير والأصناف مش بتتزامن للعميل (كتير جدًا) — بتتقرى من endpoints مخصصة عشان الأداء
   const { rows } = await pool.query(
-    "SELECT col,id,data,deleted,seq FROM docs WHERE seq>$1 AND col NOT IN ('sales','items','customers','istats','attendance','gpur','fin_daily','sret','pret','vled','cled','cheques','gcash','gdrawers','gacct','gshifts','po','vital') ORDER BY seq LIMIT 20000", [since]);
+    "SELECT col,id,data,deleted,seq FROM docs WHERE seq>$1 AND col NOT IN ('sales','items','customers','istats','attendance','gpur','fin_daily','sret','pret','vled','cled','cheques','gcash','gdrawers','gacct','gshifts','po','vital','gtreasury','gexpcats','gsalaries') ORDER BY seq LIMIT 20000", [since]);
   let seq = since;
   const docs = rows.map(r => { if (r.seq > seq) seq = Number(r.seq); return r.deleted ? { c: r.col, i: r.id, x: true } : { c: r.col, i: r.id, d: r.data }; });
   // تقديم المؤشر لتخطّي مستندات الفواتير المستبعَدة (طالما مفيش صفحة ممتلئة)
@@ -218,7 +218,7 @@ app.get('/api/sync', auth, async (req, res) => {
 });
 
 /* صلاحيات الشاشات + سجل التعديلات */
-const PERM_KEYS = ['dash', 'pos', 'invoices', 'delivery', 'items', 'stockcard', 'purch', 'returns', 'fin', 'report', 'accounts', 'statements', 'cheques', 'cust', 'vend', 'cash', 'shifts', 'emp', 'usr', 'audit'];
+const PERM_KEYS = ['dash', 'pos', 'invoices', 'delivery', 'items', 'stockcard', 'purch', 'returns', 'fin', 'report', 'accounts', 'statements', 'cheques', 'cust', 'vend', 'cash', 'shifts', 'finance', 'emp', 'usr', 'audit'];
 function userPerms(u) {
   if (u.owner) return PERM_KEYS.slice();
   if (Array.isArray(u.perms)) return u.perms.filter(k => PERM_KEYS.includes(k));
@@ -849,8 +849,40 @@ app.get('/api/cash-genius', auth, async (req, res) => {
       `SELECT data FROM docs WHERE col='gcash' AND NOT deleted
          AND (data->>'date') >= to_char(now() - ($1::int * interval '1 day'),'YYYY-MM-DD')
        ORDER BY COALESCE((data->>'ts')::bigint,0) DESC LIMIT 500`, [days]);
-    res.json({ available: true, balance: Math.round(balance * 100) / 100, drawers, movements: mv.rows.map(r => r.data) });
+    // حركة الخزينة اليومية (F_daily_Transaction_h): إيداعات/سحب بقيم وتواريخ
+    const tr = await pool.query(
+      `SELECT data FROM docs WHERE col='gtreasury' AND NOT deleted
+       ORDER BY COALESCE((data->>'ts')::bigint,0) DESC LIMIT 300`);
+    res.json({ available: true, balance: Math.round(balance * 100) / 100, drawers, movements: mv.rows.map(r => r.data), treasury: tr.rows.map(r => r.data) });
   } catch (e) { res.status(500).json({ error: 'cash-genius', detail: e.message }); }
+});
+
+// بنود المصروفات من Genius (Other_Expenses) — قائمة البنود
+app.get('/api/expense-cats', auth, async (_req, res) => {
+  try {
+    const { rows } = await pool.query(`SELECT data FROM docs WHERE col='gexpcats' AND NOT deleted ORDER BY (data->>'name')`);
+    res.json(rows.map(r => r.data));
+  } catch (e) { res.status(500).json({ error: 'expense-cats', detail: e.message }); }
+});
+
+// المرتبات من Genius (Emp_Salary) — بفترة
+app.get('/api/salaries', auth, async (req, res) => {
+  try {
+    const days = Math.min(1095, Math.max(1, parseInt(req.query.days, 10) || 365));
+    const params = [days];
+    let where = `col='gsalaries' AND NOT deleted AND left(data->>'date',10) >= to_char(now() - ($1::int * interval '1 day'),'YYYY-MM-DD')`;
+    const q = String(req.query.q || '').trim();
+    if (q) { params.push('%' + q + '%'); where += ` AND COALESCE(data->>'emp_name','') ILIKE $${params.length}`; }
+    const tot = await pool.query(
+      `SELECT count(*)::int n,
+        COALESCE(SUM(COALESCE((data->>'value')::numeric,0)),0) base,
+        COALESCE(SUM(COALESCE((data->>'overtime')::numeric,0)),0) ot,
+        COALESCE(SUM(COALESCE((data->>'net')::numeric,0)),0) net
+       FROM docs WHERE ${where}`, params);
+    const { rows } = await pool.query(`SELECT data FROM docs WHERE ${where} ORDER BY COALESCE((data->>'ts')::bigint,0) DESC LIMIT 500`, params);
+    const t = tot.rows[0];
+    res.json({ count: t.n, base: Number(t.base), overtime: Number(t.ot), net: Number(t.net), rows: rows.map(r => r.data) });
+  } catch (e) { res.status(500).json({ error: 'salaries', detail: e.message }); }
 });
 
 // شجرة الحسابات الحقيقية من Genius (F_Account_Chart) — مع تجميع الأرصدة على الآباء
