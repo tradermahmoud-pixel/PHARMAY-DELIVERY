@@ -616,7 +616,9 @@ app.get('/api/purchase-suggest', auth, async (req, res) => {
         GREATEST(0, CEIL(${needE})) AS suggest,
         (v.id IS NOT NULL) AS vital_manual,
         ${vitalE} AS vital,
-        COALESCE(NULLIF(s.data->>'avg_cost','')::numeric,0) AS avg_cost
+        COALESCE(NULLIF(s.data->>'avg_cost','')::numeric,0) AS avg_cost,
+        COALESCE(NULLIF(i.data->>'sell','')::numeric,0) AS sell,
+        COALESCE(NULLIF(i.data->>'min','')::numeric,0) AS min
       FROM docs i LEFT JOIN docs s ON s.col='istats' AND s.id=i.id
         LEFT JOIN docs v ON v.col='vital' AND v.id=i.id AND NOT v.deleted
       WHERE ${where}
@@ -661,6 +663,7 @@ app.post('/api/po', auth, async (req, res) => {
     const id = String(b.id || ('po_' + Date.now()));
     const lines = Array.isArray(b.lines) ? b.lines.filter(l => l && l.itm && (+l.qty) > 0).map(l => ({
       itm: parseInt(l.itm, 10), name: String(l.name || ''), qty: +l.qty, price: +l.price || 0,
+      disc: +l.disc || 0, exp: /^\d{4}-\d{2}-\d{2}$/.test(l.exp || '') ? l.exp : null,
     })) : [];
     if (!lines.length) return res.status(400).json({ error: 'لا توجد أصناف' });
     if (!b.vendor_id) return res.status(400).json({ error: 'اختر المورد' });
