@@ -206,7 +206,7 @@ app.get('/api/sync', auth, async (req, res) => {
   const since = parseInt(req.query.since, 10) || 0;
   // الفواتير والأصناف مش بتتزامن للعميل (كتير جدًا) — بتتقرى من endpoints مخصصة عشان الأداء
   const { rows } = await pool.query(
-    "SELECT col,id,data,deleted,seq FROM docs WHERE seq>$1 AND col NOT IN ('sales','items','customers','istats','attendance','gpur','fin_daily','sret','pret','vled','cled','cheques','gcash','gdrawers','gacct','gshifts','po','vital','gtreasury','gexpcats','gsalaries') ORDER BY seq LIMIT 20000", [since]);
+    "SELECT col,id,data,deleted,seq FROM docs WHERE seq>$1 AND col NOT IN ('sales','items','customers','istats','attendance','gpur','fin_daily','sret','pret','vled','cled','cheques','gcash','gdrawers','gacct','gshifts','po','vital','gtreasury','gexpcats','gsalaries','gcashout') ORDER BY seq LIMIT 20000", [since]);
   let seq = since;
   const docs = rows.map(r => { if (r.seq > seq) seq = Number(r.seq); return r.deleted ? { c: r.col, i: r.id, x: true } : { c: r.col, i: r.id, d: r.data }; });
   // تقديم المؤشر لتخطّي مستندات الفواتير المستبعَدة (طالما مفيش صفحة ممتلئة)
@@ -863,6 +863,40 @@ app.get('/api/expense-cats', auth, async (_req, res) => {
     const { rows } = await pool.query(`SELECT data FROM docs WHERE col='gexpcats' AND NOT deleted ORDER BY (data->>'name')`);
     res.json(rows.map(r => r.data));
   } catch (e) { res.status(500).json({ error: 'expense-cats', detail: e.message }); }
+});
+
+// صرف النقدية من Genius (F_Transaction_Header, fh_from_type=3) — مسحوبات/مدفوعات/مصروفات
+app.get('/api/cashout', auth, async (req, res) => {
+  try {
+    const days = Math.min(730, Math.max(1, parseInt(req.query.days, 10) || 90));
+    const kind = ['emp', 'ven', 'exp', 'other'].includes(req.query.kind) ? req.query.kind : '';
+    const grouped = req.query.group === '1';
+    const params = [days];
+    let where = `col='gcashout' AND NOT deleted AND left(data->>'date',10) >= to_char(now() - ($1::int * interval '1 day'),'YYYY-MM-DD')`;
+    if (kind) { params.push(kind); where += ` AND data->>'kind' = $${params.length}`; }
+    const q = String(req.query.q || '').trim();
+    if (q) { params.push('%' + q + '%'); where += ` AND (COALESCE(data->>'name','') ILIKE $${params.length} OR COALESCE(data->>'notes','') ILIKE $${params.length})`; }
+    const tot = await pool.query(
+      `SELECT count(*)::int n, COALESCE(SUM(COALESCE((data->>'value')::numeric,0)),0) v,
+        COALESCE(SUM(CASE WHEN data->>'kind'='emp' THEN (data->>'value')::numeric ELSE 0 END),0) emp,
+        COALESCE(SUM(CASE WHEN data->>'kind'='ven' THEN (data->>'value')::numeric ELSE 0 END),0) ven,
+        COALESCE(SUM(CASE WHEN data->>'kind'='exp' THEN (data->>'value')::numeric ELSE 0 END),0) exp
+       FROM docs WHERE ${where}`, params);
+    const t = tot.rows[0];
+    if (grouped) {
+      const { rows } = await pool.query(
+        `SELECT data->>'kind' AS kind, COALESCE(NULLIF(data->>'name',''),'غير محدّد') AS name,
+                COUNT(*)::int AS cnt, COALESCE(SUM(COALESCE((data->>'value')::numeric,0)),0) AS total
+         FROM docs WHERE ${where}
+         GROUP BY data->>'kind', COALESCE(NULLIF(data->>'name',''),'غير محدّد')
+         ORDER BY total DESC LIMIT 500`, params);
+      return res.json({ grouped: true, count: t.n, total: Number(t.v), emp: Number(t.emp), ven: Number(t.ven), exp: Number(t.exp),
+        rows: rows.map(r => ({ kind: r.kind, name: r.name, count: r.cnt, total: Number(r.total) })) });
+    }
+    params.push(500);
+    const { rows } = await pool.query(`SELECT data FROM docs WHERE ${where} ORDER BY COALESCE((data->>'ts')::bigint,0) DESC LIMIT $${params.length}`, params);
+    res.json({ grouped: false, count: t.n, total: Number(t.v), emp: Number(t.emp), ven: Number(t.ven), exp: Number(t.exp), rows: rows.map(r => r.data) });
+  } catch (e) { res.status(500).json({ error: 'cashout', detail: e.message }); }
 });
 
 // المرتبات من Genius (Emp_Salary) — بفترة

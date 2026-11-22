@@ -1437,15 +1437,71 @@ function renderCashGenius(){
 }
 
 /* ---------- المصروفات والمرتبات (قراءة من Genius) ---------- */
-let finTab='salaries', salDays=365, salQ='', salData=null, salReq=0, expcData=null, expcReq=0;
+let finTab='cashout', salDays=365, salQ='', salData=null, salReq=0, expcData=null, expcReq=0;
+let coDays=90, coKind='', coGroup=true, coQ='', coData=null, coReq=0;
 function vFinance(v){
-  v.innerHTML=`<div class="sbar"><div class="seg" style="max-width:360px">
+  v.innerHTML=`<div class="sbar"><div class="seg" style="max-width:520px;flex-wrap:wrap">
+    <button class="${finTab==='cashout'?'on':''}" onclick="finTab='cashout';vFinance($('#view'))">${icon('wallet')} صرف النقدية</button>
     <button class="${finTab==='salaries'?'on':''}" onclick="finTab='salaries';vFinance($('#view'))">${icon('users')} المرتبات</button>
-    <button class="${finTab==='expenses'?'on':''}" onclick="finTab='expenses';vFinance($('#view'))">${icon('wallet')} بنود المصروفات</button>
+    <button class="${finTab==='expenses'?'on':''}" onclick="finTab='expenses';vFinance($('#view'))">${icon('ledger')} بنود المصروفات</button>
   </div></div><div id="finBody"></div>`;
-  if(finTab==='salaries'){renderSalaries();if(salData===null)loadSalaries();}
+  if(finTab==='cashout'){renderCashout();if(coData===null)loadCashout();}
+  else if(finTab==='salaries'){renderSalaries();if(salData===null)loadSalaries();}
   else{renderExpCats();if(expcData===null)loadExpCats();}
 }
+const CO_KIND={emp:['مسحوبات موظفين','g'],ven:['مدفوعات موردين','n'],exp:['مصروفات','w'],other:['أخرى','n']};
+function loadCashout(){
+  const my=++coReq;
+  const u=(window.__BASE__||'')+'/api/cashout?days='+coDays+'&kind='+coKind+'&group='+(coGroup?'1':'0')+'&q='+encodeURIComponent(coQ.trim());
+  fetch(u,{credentials:'same-origin'}).then(r=>r.ok?r.json():null).then(j=>{if(my!==coReq)return;coData=j||{rows:[]};if(route==='finance'&&finTab==='cashout')renderCashout();})
+    .catch(()=>{if(my===coReq){coData={rows:[]};renderCashout();}});
+}
+function renderCashout(){
+  const b=$('#finBody');if(!b)return;const j=coData;
+  const DS=[[30,'شهر'],[90,'٣ شهور'],[365,'سنة']];
+  const head=`<div class="sbar" style="flex-wrap:wrap;gap:8px">
+    <div class="search" style="min-width:170px">${icon('search')}<input id="coq" placeholder="بحث بالاسم أو الملاحظة…" value="${esc(coQ)}"></div>
+    <div class="seg">
+      <button class="${coKind===''?'on':''}" onclick="coKind='';loadCashout()">الكل</button>
+      <button class="${coKind==='emp'?'on':''}" onclick="coKind='emp';loadCashout()">مسحوبات موظفين</button>
+      <button class="${coKind==='ven'?'on':''}" onclick="coKind='ven';loadCashout()">موردين</button>
+      <button class="${coKind==='exp'?'on':''}" onclick="coKind='exp';loadCashout()">مصروفات</button>
+    </div>
+    <div class="seg">${DS.map(d=>`<button class="${coDays===d[0]?'on':''}" onclick="coDays=${d[0]};loadCashout()">${d[1]}</button>`).join('')}</div>
+    <div class="seg"><button class="${coGroup?'on':''}" onclick="coGroup=true;loadCashout()">مجمّع بالاسم</button><button class="${!coGroup?'on':''}" onclick="coGroup=false;loadCashout()">تفصيلي</button></div>
+    <div class="sp" style="flex:1"></div><button class="btn sm" onclick="loadCashout()">${icon('refresh')} تحديث</button>
+  </div>`;
+  if(j===null){b.innerHTML=head+`<div class="empty">${icon('wallet',44)}<div>بحمّل…</div></div>`;wireCO();return;}
+  const rows=j.rows||[];
+  const kpis=`<div class="kpis" style="grid-template-columns:repeat(auto-fill,minmax(160px,1fr));margin-bottom:12px">
+    <div class="kpi accent"><div class="t">${icon('cash')} إجمالي الصرف</div><div class="v">${money(j.total)}</div><div class="s">${num(j.count)} مستند</div></div>
+    <div class="kpi"><div class="t">مسحوبات الموظفين</div><div class="v" style="color:var(--danger)">${money(j.emp)}</div></div>
+    <div class="kpi"><div class="t">مدفوعات الموردين</div><div class="v">${money(j.ven)}</div></div>
+    <div class="kpi"><div class="t">مصروفات</div><div class="v" style="color:var(--warn)">${money(j.exp)}</div></div>
+  </div>`;
+  let tbl;
+  if(j.grouped){
+    tbl=`<table class="tbl"><thead><tr><th>الاسم</th><th>النوع</th><th>عدد</th><th>الإجمالي</th></tr></thead>
+    <tbody>${rows.length?rows.map(r=>{const k=CO_KIND[r.kind]||['',''];return `<tr>
+      <td style="font-weight:600">${esc(r.name)}</td>
+      <td><span class="pill ${k[1]}">${k[0]}</span></td>
+      <td class="num">${num(r.count)}</td>
+      <td class="num"><b>${moneyp(r.total)}</b></td>
+    </tr>`}).join(''):`<tr><td colspan=4><div class="empty">${icon('wallet',44)}<div>لا بيانات · بتظهر بعد مزامنة المالية</div></div></td></tr>`}</tbody></table>`;
+  }else{
+    tbl=`<table class="tbl"><thead><tr><th>التاريخ</th><th>المستلم</th><th>النوع</th><th>البيان</th><th>القيمة</th></tr></thead>
+    <tbody>${rows.length?rows.map(r=>{const k=CO_KIND[r.kind]||['',''];return `<tr>
+      <td class="num" dir="ltr" style="text-align:right;white-space:nowrap;font-size:12px">${esc((r.date||'').slice(0,16))}</td>
+      <td style="font-weight:600">${esc(r.name||'—')}</td>
+      <td><span class="pill ${k[1]}">${k[0]}</span></td>
+      <td style="color:var(--muted);font-size:12.5px">${esc(r.notes||'')}</td>
+      <td class="num"><b>${moneyp(r.value)}</b></td>
+    </tr>`}).join(''):`<tr><td colspan=5><div class="empty">${icon('wallet',44)}<div>لا بيانات · بتظهر بعد مزامنة المالية</div></div></td></tr>`}</tbody></table>`;
+  }
+  b.innerHTML=head+kpis+`<div class="card"><div class="tbl-wrap">${tbl}</div></div>`;
+  wireCO();
+}
+function wireCO(){const q=$('#coq');if(q)q.oninput=e=>{coQ=e.target.value;clearTimeout(rT);rT=setTimeout(loadCashout,300)};}
 function loadSalaries(){
   const my=++salReq;
   const u=(window.__BASE__||'')+'/api/salaries?days='+salDays+'&q='+encodeURIComponent(salQ.trim());
