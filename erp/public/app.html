@@ -1150,7 +1150,7 @@ function renderPO(){
       <td class="num">${p.genius_pth?`<b>${esc(String(p.genius_pth))}</b>`:'—'}</td>
       <td class="num" style="font-size:11px;color:var(--muted)">${p.at?fmtDT(p.at):''}</td>
       <td style="white-space:nowrap">
-        ${(p.status==='draft'||p.status==='failed')?`<button class="ic-btn" title="تعديل" onclick="poEditOpen('${p.id}')">${icon('edit')}</button>`:''}
+        ${(p.status!=='done'&&!p.genius_pth)?`<button class="ic-btn" title="تعديل" onclick="poEditOpen('${p.id}')">${icon('edit')}</button>`:''}
         ${p.status==='failed'?`<button class="ic-btn" title="إعادة إرسال" onclick="poResend('${p.id}')">${icon('refresh')}</button>`:''}
         ${(p.status==='draft'||p.status==='failed')?`<button class="ic-btn" title="حذف" onclick="poDel('${p.id}')">${icon('trash')}</button>`:''}
         ${p.status==='draft'?`<button class="ic-btn" title="تحويل لـ Genius" onclick="poSend('${p.id}')">${icon('plus')}</button>`:''}
