@@ -1223,9 +1223,11 @@ app.get('/api/stock-summary', auth, async (_req, res) => {
     const out = await memo('stock', 60000, async () => {
     const s = await pool.query(
       `SELECT count(*)::int AS items,
-        COALESCE(SUM((data->>'stock')::numeric * COALESCE(NULLIF(data->>'buy','')::numeric,0)),0) AS stock_value,
-        COUNT(*) FILTER (WHERE (data->>'min')::numeric>0 AND (data->>'stock')::numeric<=(data->>'min')::numeric)::int AS low_count
-       FROM docs WHERE col='items' AND NOT deleted`);
+        COALESCE(SUM(COALESCE(NULLIF(i.data->>'stock','')::numeric,0) * COALESCE(NULLIF(st.data->>'avg_cost','')::numeric,0)),0) AS stock_value,
+        COALESCE(SUM(COALESCE(NULLIF(i.data->>'stock','')::numeric,0) * COALESCE(NULLIF(i.data->>'sell','')::numeric,0)),0) AS stock_sell,
+        COUNT(*) FILTER (WHERE COALESCE(NULLIF(i.data->>'min','')::numeric,0)>0 AND COALESCE(NULLIF(i.data->>'stock','')::numeric,0)<=COALESCE(NULLIF(i.data->>'min','')::numeric,0))::int AS low_count
+       FROM docs i LEFT JOIN docs st ON st.col='istats' AND st.id=i.id
+       WHERE i.col='items' AND NOT i.deleted`);
     const low = await pool.query(
       `SELECT id,data FROM docs WHERE col='items' AND NOT deleted
         AND (data->>'min')::numeric>0 AND (data->>'stock')::numeric<=(data->>'min')::numeric

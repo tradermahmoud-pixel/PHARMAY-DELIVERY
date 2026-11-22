@@ -114,6 +114,12 @@ label.fld>span{display:block;margin-bottom:5px}
 .kpi .v{font:700 25px/1.1 "IBM Plex Sans Arabic";margin-top:9px;letter-spacing:-.01em}
 .kpi .v small{font-size:13px;color:var(--muted);font-weight:600}
 .kpi .s{font-size:12px;color:var(--muted);margin-top:4px}
+.kpi.clk{cursor:pointer;transition:transform .12s ease,box-shadow .12s ease,border-color .12s ease;position:relative}
+.kpi.clk:hover{transform:translateY(-2px);box-shadow:0 8px 22px rgba(0,0,0,.10);border-color:color-mix(in srgb,var(--brand) 45%,var(--line))}
+.kpi.clk:active{transform:translateY(0)}
+.kpi.clk::after{content:"‹";position:absolute;inset-inline-start:12px;top:14px;font-size:20px;line-height:1;color:var(--muted);opacity:0;transition:opacity .12s ease}
+.kpi.clk:hover::after{opacity:.65}
+.kpi.accent.clk::after{color:rgba(255,255,255,.9)}
 .kpi.accent{background:linear-gradient(160deg,var(--brand2),var(--brand));border-color:transparent;color:#fff}
 .kpi.accent .t,.kpi.accent .s{color:rgba(255,255,255,.82)}
 .kpi.accent .v small{color:rgba(255,255,255,.75)}
@@ -400,16 +406,24 @@ function render(){
 }
 
 /* ---------- Dashboard ---------- */
-let salesSummary=null, stockSum=null, summaryAt=0, summaryLoading=false;
+let salesSummary=null, stockSum=null, dashCash=null, summaryAt=0, summaryLoading=false;
 function isoLocal(off){const d=new Date();d.setDate(d.getDate()-(off||0));return d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0')}
+// رصيد الخزنة للوحة: الفعلي من Genius لو متزامن، وإلا اليدوي لو فيه حركات، وإلا — (مش متزامن)
+function dashCashBalance(){
+  if(dashCash&&dashCash.available)return +dashCash.balance||0;
+  const man=arr('cash');
+  if(man.length)return cashBalance();
+  return null;
+}
 function refreshSummary(force){
   if(summaryLoading)return; if(!force && Date.now()-summaryAt<15000)return;
   summaryLoading=true;const B=(window.__BASE__||'');
   Promise.all([
     fetch(B+'/api/sales-summary',{credentials:'same-origin'}).then(r=>r.ok?r.json():null).catch(()=>null),
     fetch(B+'/api/stock-summary',{credentials:'same-origin'}).then(r=>r.ok?r.json():null).catch(()=>null),
-    fetch(B+'/api/parties-summary',{credentials:'same-origin'}).then(r=>r.ok?r.json():null).catch(()=>null)
-  ]).then(([s,st,ps])=>{if(s)salesSummary=s;if(st)stockSum=st;if(ps)partiesSum=ps;summaryAt=Date.now();if(route==='dash'){const vv=$('#view');if(vv)vDash(vv);}})
+    fetch(B+'/api/parties-summary',{credentials:'same-origin'}).then(r=>r.ok?r.json():null).catch(()=>null),
+    fetch(B+'/api/cash-genius?days=1',{credentials:'same-origin'}).then(r=>r.ok?r.json():null).catch(()=>null)
+  ]).then(([s,st,ps,cg])=>{if(s)salesSummary=s;if(st)stockSum=st;if(ps)partiesSum=ps;if(cg)dashCash=cg;summaryAt=Date.now();if(route==='dash'){const vv=$('#view');if(vv)vDash(vv);}})
     .finally(()=>{summaryLoading=false});
 }
 function vDash(v){
@@ -426,16 +440,17 @@ function vDash(v){
   let mSales=0,mProfit=0;const m0=isoLocal(29);(S.daily||[]).forEach(r=>{if(r.day>=m0){mSales+=+r.sales||0;mProfit+=+r.profit||0}});
   const top=(S.top||[]).map(t=>({name:t.name,qty:+t.qty||0,val:+t.val||0}));
 
+  const cashV=dashCashBalance();
   v.innerHTML=`
   <div class="kpis">
-    <div class="kpi accent"><div class="t">${icon('pos')} مبيعات اليوم</div><div class="v">${money(tSales)}</div><div class="s">${today.n} فاتورة · أمس ${moneyp(yest.sales)}</div></div>
-    <div class="kpi"><div class="t">${icon('profit')} ربح اليوم</div><div class="v">${money(tProfit)}</div><div class="s">هامش ${tSales?Math.round(tProfit/tSales*100):0}%</div></div>
-    <div class="kpi"><div class="t">${icon('cash')} رصيد الخزنة</div><div class="v">${money(cashBalance())}</div><div class="s">صافي النقدية</div></div>
-    <div class="kpi"><div class="t">${icon('box')} قيمة المخزون</div><div class="v">${money(SS.stock_value)}</div><div class="s">${num(SS.items)} صنف</div></div>
-    <div class="kpi"><div class="t">${icon('warn')} أصناف تحت الحد</div><div class="v" style="color:${SS.low_count?'var(--danger)':'var(--ok)'}">${num(SS.low_count)}</div><div class="s">تحتاج إعادة طلب</div></div>
-    <div class="kpi"><div class="t">${icon('users')} ديون العملاء</div><div class="v">${money(custDebt())}</div><div class="s">مستحق لنا</div></div>
-    <div class="kpi"><div class="t">${icon('truck')} مديونية الموردين</div><div class="v">${money(vendDebt())}</div><div class="s">مستحق علينا</div></div>
-    <div class="kpi"><div class="t">${icon('pos')} مبيعات الشهر</div><div class="v">${money(mSales)}</div><div class="s">ربح ${moneyp(mProfit)}</div></div>
+    <div class="kpi accent clk" onclick="go('invoices')"><div class="t">${icon('pos')} مبيعات اليوم</div><div class="v">${money(tSales)}</div><div class="s">${today.n} فاتورة · أمس ${moneyp(yest.sales)}</div></div>
+    <div class="kpi clk" onclick="go('fin')"><div class="t">${icon('profit')} ربح اليوم</div><div class="v">${money(tProfit)}</div><div class="s">هامش ${tSales?Math.round(tProfit/tSales*100):0}%</div></div>
+    <div class="kpi clk" onclick="go('cash')"><div class="t">${icon('cash')} رصيد الخزنة</div><div class="v">${cashV===null?'<small>—</small>':money(cashV)}</div><div class="s">${cashV===null?'شغّل مزامنة الخزنة':'صافي النقدية (Genius)'}</div></div>
+    <div class="kpi clk" onclick="go('items')"><div class="t">${icon('box')} قيمة المخزون</div><div class="v">${money(SS.stock_value)}</div><div class="s">${num(SS.items)} صنف</div></div>
+    <div class="kpi clk" onclick="itemFilter='low';go('items')"><div class="t">${icon('warn')} أصناف تحت الحد</div><div class="v" style="color:${SS.low_count?'var(--danger)':'var(--ok)'}">${num(SS.low_count)}</div><div class="s">تحتاج إعادة طلب</div></div>
+    <div class="kpi clk" onclick="go('cust')"><div class="t">${icon('users')} ديون العملاء</div><div class="v">${money(custDebt())}</div><div class="s">مستحق لنا</div></div>
+    <div class="kpi clk" onclick="go('vend')"><div class="t">${icon('truck')} مديونية الموردين</div><div class="v">${money(vendDebt())}</div><div class="s">مستحق علينا</div></div>
+    <div class="kpi clk" onclick="go('fin')"><div class="t">${icon('pos')} مبيعات الشهر</div><div class="v">${money(mSales)}</div><div class="s">ربح ${moneyp(mProfit)}</div></div>
   </div>
   <div class="two">
     <div class="card" style="padding:18px">
